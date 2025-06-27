@@ -199,27 +199,57 @@ Container *Container::add(std::string_view id) {
     return container;
 }
 
-void Container::write(std::ostream &s, int indent) {
-    bool multiLine = count() > 16;
+std::string Container::getTag(int index, const std::string &defaultValue) {
+    auto value = getValue(index);
+    if (value == nullptr)
+        return defaultValue;
 
-    s << '(' << this->id;
+    return value->value;
+}
 
-    bool multiline2 = false;
-    for (auto element : this->elements) {
-        multiline2 |= dynamic_cast<Container *>(element) != nullptr;
+std::string Container::getString(int index, const std::string &defaultValue) {
+    auto value = getValue(index);
+    if (value == nullptr)
+        return defaultValue;
 
-        if (multiLine && multiline2) {
-            newLine(s, indent + 1);
-        } else {
-            s << ' ';
-        }
+    // remove quotes
+    int size = value->value.size();
+    if (size >= 2 && value->value.front() == '"' && value->value.back() == '"')
+        return std::string(value->value.substr(1, size - 2));
 
-        element->write(s, indent + 1);
+    return value->value;
+}
+
+int Container::getInt(int index, int defaultValue) {
+    auto value = getValue(index);
+    if (value == nullptr)
+        return defaultValue;
+
+    // cast to int
+    try {
+        return std::stoi(value->value);
+    } catch (std::exception &) {
+        return defaultValue;
     }
-    if (multiLine && multiline2) {
-        newLine(s, indent);
+}
+
+double Container::getDouble(int index, double defaultValue) {
+    auto value = getValue(index);
+    if (value == nullptr)
+        return defaultValue;
+
+    // cast to double
+    try {
+        return std::stod(value->value);
+    } catch (std::exception &) {
+        return defaultValue;
     }
-    s << ')';
+}
+
+void Container::setDouble(int index, double value) {
+    if (index >= this->elements.size())
+        this->elements.resize(index + 1);
+    this->elements[index] = new Value(std::to_string(value));
 }
 
 bool Container::contains(const std::string &value) {
@@ -245,29 +275,36 @@ Container *Container::find(const std::string &id) {
     return nullptr;
 }
 
-std::string Container::findValue(const std::string &id) {
+std::string Container::findString(const std::string &id) {
     for (auto element : this->elements) {
         auto container = dynamic_cast<Container *>(element);
         if (container != nullptr) {
-            if (container->id == id && container->elements.size() >= 1) {
-                auto value = dynamic_cast<kicad::Value *>(container->elements[0]);
-                if (value != nullptr)
-                    return value->value;
+            if (container->id == id) {
+                return container->getString(0);
             }
         }
     }
     return {};
 }
 
-Container::Value2 Container::findValue2(const std::string &id) {
+Container::Value2<std::string> Container::findString2(const std::string &id) {
     for (auto element : this->elements) {
         auto container = dynamic_cast<Container *>(element);
         if (container != nullptr) {
-            if (container->id == id && container->elements.size() >= 2) {
-                auto value1 = dynamic_cast<kicad::Value *>(container->elements[0]);
-                auto value2 = dynamic_cast<kicad::Value *>(container->elements[1]);
-                if (value1 != nullptr && value2 != nullptr)
-                    return {value1->value, value2->value};
+            if (container->id == id) {
+                return {container->getString(0), container->getString(1)};
+            }
+        }
+    }
+    return {};
+}
+
+Container::Value2<float> Container::findFloat2(const std::string &id) {
+    for (auto element : this->elements) {
+        auto container = dynamic_cast<Container *>(element);
+        if (container != nullptr) {
+            if (container->id == id) {
+                return {container->getFloat(0), container->getFloat(1)};
             }
         }
     }
@@ -282,6 +319,29 @@ void Container::erase(Element *element) {
             return;
         }
     }
+}
+
+void Container::write(std::ostream &s, int indent) {
+    bool multiLine = count() > 16;
+
+    s << '(' << this->id;
+
+    bool multiline2 = false;
+    for (auto element : this->elements) {
+        multiline2 |= dynamic_cast<Container *>(element) != nullptr;
+
+        if (multiLine && multiline2) {
+            newLine(s, indent + 1);
+        } else {
+            s << ' ';
+        }
+
+        element->write(s, indent + 1);
+    }
+    if (multiLine && multiline2) {
+        newLine(s, indent);
+    }
+    s << ')';
 }
 
 void Container::newLine(std::ostream &s, int indent) {

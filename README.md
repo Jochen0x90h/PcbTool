@@ -11,6 +11,7 @@ Can be used to hide some or all references or remove nets from pads prior to aut
 | Parameter                                      | Description
 |------------------------------------------------|-----------------
 | -xfp \<old footprint> \<new footprint>         | Exchange footprint (only schematic)
+| -ijb \<bom file>                               | Import downloaded JLCPCB BOM Excel file (only schematic)
 | -xsw \<old segment width> \<new segment width> | Exchange segment width (only pcb)
 | -xvs \<old via size> \<new via size>           | Exchange segment width (only pcb)
 | -hr \<reference>                               | Hide reference, supports regular expressions, e.g. R.* (only pcb)
@@ -24,3 +25,6 @@ Can be used to hide some or all references or remove nets from pads prior to aut
 | pcb_tool -hr .* test.kicad_pcb                                   | Hide all references
 | pcb_tool -hr R.* test.kicad_pcb                                  | Hide all resistors
 | pcb_tool -rn GND -rn \\+3V3 test.kicad_pcb                       | Remove GND and 3.3V before autorouting
+
+## Build
+Use [conan](support/conan/README.md) or [vcpkg](support/vcpkg/README.md).

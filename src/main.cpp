@@ -1,3 +1,5 @@
+//#include <OpenXLSX/OpenXLSX.hpp> // https://github.com/troldal/OpenXLSX
+#include <xlnt/xlnt.hpp> // https://github.com/tfussell/xlnt
 #include <fstream>
 #include <filesystem>
 #include <iostream>
@@ -7,7 +9,30 @@
 
 namespace fs = std::filesystem;
 
-constexpr float pif = 3.1416f;
+constexpr double pi = 3.1416f;
+
+
+struct Properties {
+    std::string manufacturer;
+    std::string mfrPn;
+    std::string datasheet;
+    std::string lcscPn;
+};
+
+void addProperty(kicad::Container *symbol, kicad::Container *property, std::string_view name, std::string_view value,
+    double x, double y)
+{
+    if (property == nullptr) {
+        property = symbol->add("property");
+        property->setString(0, name);
+        property->setString(1, value);
+        property->add("at")->addFloat(x).addFloat(y).addInt(0);
+        property->add("effects")->add("hide")->addTag("yes");
+    } else {
+        property->setString(1, value);
+    }
+
+}
 
 
 template <typename T>
@@ -26,25 +51,25 @@ inline auto operator -(const Vector2<T1> &a, const Vector2<T2> &b) {
     return Vector2<decltype(a.x - b.x)>(a.x - b.x, a.y - b.y);
 }
 
-using float2 = Vector2<float>;
+using double2 = Vector2<double>;
 
-float distance(float2 a, float2 b) {
-    float2 d = a - b;
+double distance(double2 a, double2 b) {
+    double2 d = a - b;
     return sqrt(d.x * d.x + d.y * d.y);
 }
 
 
 struct Orientation {
-    float2 position;
-    float rotation;
+    double2 position;
+    double rotation;
 
     /// @brief Transform a point from local to global coordinates
     /// @param p Point
     /// @return Point in global coordinates
-    float2 toGlobal(float2 p) {
-        float r = this->rotation * pif / 180.0f;
-        float s = sin(r);
-        float c = cos(r);
+    double2 toGlobal(double2 p) {
+        double r = this->rotation * pi / 180.0;
+        double s = sin(r);
+        double c = cos(r);
 
         return {this->position.x + c * p.x + s * p.y, this->position.y + c * p.y - s * p.x};
     }
@@ -52,10 +77,10 @@ struct Orientation {
     /// @brief Transform a point from global to local coordinates
     /// @param p Point
     /// @return Point in local coordinates
-    float2 toLocal(float2 p) {
-        float r = -this->rotation * pif / 180.0f;
-        float s = sin(r);
-        float c = cos(r);
+    double2 toLocal(double2 p) {
+        double r = -this->rotation * pi / 180.0;
+        double s = sin(r);
+        double c = cos(r);
 
         return {(p.x - this->position.x) * c + (p.y - this->position.y) * s,
             (p.y - this->position.y) * c - (p.x - this->position.x) * s};
@@ -65,9 +90,9 @@ struct Orientation {
     /// @param o Orientation
     /// @return Orientation in global coordinates
     Orientation toGlobal(Orientation o) {
-        float r = this->rotation * pif / 180.0f;
-        float s = sin(r);
-        float c = cos(r);
+        double r = this->rotation * pi / 180.0;
+        double s = sin(r);
+        double c = cos(r);
 
         return {{this->position.x + c * o.position.x + s * o.position.y,
             this->position.y + c * o.position.y - s * o.position.x},
@@ -78,9 +103,9 @@ struct Orientation {
     /// @param o Orientation
     /// @return Orientation in local coordinates
     Orientation toLocal(Orientation o) {
-        float r = -this->rotation * pif / 180.0f;
-        float s = sin(r);
-        float c = cos(r);
+        double r = -this->rotation * pi / 180.0;
+        double s = sin(r);
+        double c = cos(r);
 
         return {{(o.position.x - this->position.x) * c + (o.position.y - this->position.y) * s,
             (o.position.y - this->position.y) * c - (o.position.x - this->position.x) * s},
@@ -91,7 +116,7 @@ struct Orientation {
 struct Pad {
     std::string name;
     kicad::Container *at;
-    float2 position;
+    double2 position;
     int netNumber;
 };
 
@@ -152,8 +177,8 @@ void getFootprints(kicad::Container &file, std::list<Footprint>& refFootprints,
 
                 // iterate over properties of footprint
                 kicad::Container *at = nullptr;
-                float2 position = {0, 0};
-                float rotation = 0;
+                double2 position = {0, 0};
+                double rotation = 0;
                 std::string reference;
                 std::string value;
                 std::vector<Pad> pads;
@@ -220,7 +245,6 @@ void getFootprints(kicad::Container &file, std::list<Footprint>& refFootprints,
             }
         }
     }
-
 }
 
 
@@ -229,13 +253,9 @@ int main(int argc, const char **argv) {
     if (argc < 2)
         return 1;
 
-/*    Orientation o{{10.0f, 10.0f}, 90.0f};
-    float2 p{0.0f, 1.0f};
-    float2 q = o.toGlobal(p);
-    float2 r = o.toLocal(q);*/
-
     // schematic options
     std::map<std::string, std::string> exchangeFootprint;
+    std::map<std::string, Properties> importedBom;
 
     // pcb options
     std::map<int, double> exchangeSegmentWidth;
@@ -255,6 +275,41 @@ int main(int argc, const char **argv) {
             // exchange footprint
             i += 2;
             exchangeFootprint[argv[i - 1]] = argv[i];
+        } else if (arg == "-ijb") {
+            // import JLCPCB BOM
+            ++i;
+            fs::path xlsPath = argv[i];
+            /*OpenXLSX::XLDocument doc;
+            doc.open(xlsPath.string());
+            if (doc.isOpen()) {
+                auto sheet = doc.workbook().sheet(1).get<OpenXLSX::XLWorksheet>();
+                for (uint32_t row = 6; row <= sheet.rowCount(); ++row) {
+                    auto references = sheet.cell(row, 1).value().get<std::string>();
+                    auto manufacturer = sheet.cell(row, 8).value().get<std::string>();
+                    auto mfrPn = sheet.cell(row, 7).value().get<std::string>();
+                    auto datasheet = sheet.cell(row, 14).value().get<std::string>();
+                    auto lcscPn = sheet.cell(row, 13).value().get<std::string>();
+
+                    // split references (designators) by comma
+                    std::stringstream ss(references);
+                    while (ss.good()) {
+                        std::string reference;
+                        std::getline(ss, reference, ',');
+                        importedBom[reference] = {manufacturer, mfrPn, datasheet, lcscPn};
+                    }
+                }
+                doc.close();
+            }*/
+            xlnt::workbook wb;
+            wb.load(xlsPath);
+            auto sheet = wb.active_sheet();
+            for (uint32_t row = 6; row <= sheet.highest_row(); ++row) {
+                auto references = sheet[xlnt::cell_reference(1, row)].to_string();
+                auto manufacturer = sheet[xlnt::cell_reference(8, row)].to_string();
+                auto mfrPn = sheet[xlnt::cell_reference(7, row)].to_string();
+                auto datasheet = sheet[xlnt::cell_reference(14, row)].to_string();
+                auto lcscPn = sheet[xlnt::cell_reference(13, row)].to_string();
+            }
         } else if (arg == "-rsw") {
             // exchange segment width
             i += 2;
@@ -333,7 +388,7 @@ int main(int argc, const char **argv) {
         bool isPcb = path.extension() == ".kicad_pcb";
 
         if (!isSchematic && !isPcb) {
-            std::cout << "Error: File type not supported" << std::endl;
+            std::cout << "Error: File type of " << path.string() << " not supported" << std::endl;
             return 1;
         }
 
@@ -354,22 +409,65 @@ int main(int argc, const char **argv) {
                 if (container1) {
                     // check if it is a symbol
                     if (container1->id == "symbol") {
+                        auto symbol = container1;
+
                         // iterate over properties
-                        for (auto element2 : container1->elements) {
-                            auto container2 = dynamic_cast<kicad::Container *>(element2);
-                            if (container2) {
-                                if (container2->id == "property") {
-                                    auto property = container2;
-                                    if (property->getString(0) == "Footprint") {
+                        std::string reference;
+                        double x = 0;
+                        double y = 0;
+                        kicad::Container *manufacturer = nullptr;
+                        kicad::Container *mfrPn = nullptr;
+                        kicad::Container *datasheet = nullptr;
+                        kicad::Container *lcscPn = nullptr;
+                        //for (auto element2 : symbol->elements) {
+                        auto it = symbol->elements.begin();
+                        while (it != symbol->elements.end()) {
+                            auto property = dynamic_cast<kicad::Container *>(*it);//element2);
+                            auto next = it;
+                            ++next;
+                            if (property != nullptr) {
+                                if (property->id == "at") {
+                                    x = property->getFloat(0);
+                                    y = property->getFloat(1);
+                                }
+                                if (property->id == "property") {
+                                    auto propertyName = property->getString(0);
+                                    if (propertyName == "Reference") {
+                                        reference = property->getString(1);
+                                    } else if (propertyName == "Footprint") {
                                         // replace footprint
-                                        std::string footprint = property->getString(1);
-                                        auto it = exchangeFootprint.find(footprint);
+                                        auto footprint = property;
+                                        auto footprintName = footprint->getString(1);
+                                        auto it = exchangeFootprint.find(footprintName);
                                         if (it != exchangeFootprint.end()) {
                                             std::cout << "Replace footprint " << it->first << " by " << it->second << std::endl;
-                                            property->elements[1] = new kicad::Value('"' + it->second + '"');
+                                            //footprint->elements[1] = new kicad::Value('"' + it->second + '"');
+                                            footprint->setString(1, it->second);
                                         }
+                                    } else if (propertyName == "Manufacturer") {
+                                        manufacturer = property;
+                                        //next = symbol->elements.erase(it);
+                                    } else if (propertyName == "Mfr. PN") {
+                                        mfrPn = property;
+                                        //next = symbol->elements.erase(it);
+                                    } else if (propertyName == "Datasheet") {
+                                            datasheet = property;
+                                    } else if (propertyName == "LCSC PN") {
+                                        lcscPn = property;
+                                        //next = symbol->elements.erase(it);
                                     }
                                 }
+                            }
+                            it = next;
+                        }
+
+                        {
+                            auto it = importedBom.find(reference);
+                            if (it != importedBom.end()) {
+                                addProperty(symbol, manufacturer, "Manufacturer", it->second.manufacturer, x, y);
+                                addProperty(symbol, mfrPn, "Mfr. PN", it->second.mfrPn, x, y);
+                                addProperty(symbol, datasheet, "Datasheet", it->second.datasheet, x, y);
+                                addProperty(symbol, lcscPn, "LCSC PN", it->second.lcscPn, x, y);
                             }
                         }
                     }
@@ -378,7 +476,7 @@ int main(int argc, const char **argv) {
         }
 
         if (isPcb) {
-            float2 moveFootprintPosition = {};
+            double2 moveFootprintPosition = {};
             for (auto element1 : file.elements) {
                 auto container1 = dynamic_cast<kicad::Container *>(element1);
                 if (container1) {
@@ -391,8 +489,8 @@ int main(int argc, const char **argv) {
                         //std::cout << "Footprint: " << footprintName << std::endl;
 
                         // iterate over properties of footprint
-                        float2 position = {0, 0};
-                        float rotation = 0;
+                        double2 position = {0, 0};
+                        double rotation = 0;
                         std::string reference;
                         std::string value;
                         for (auto element2 : footprint->elements) {
@@ -427,7 +525,7 @@ int main(int argc, const char **argv) {
                                             property->erase(hide);
 
                                             // add hide attribute
-                                            property->add("hide", "yes");
+                                            property->add("hide")->addTag("yes");
                                         }
                                     } else if (propertyName == "Value") {
                                         // get reference and hide if requested
@@ -466,11 +564,10 @@ int main(int argc, const char **argv) {
                         auto width = segment->find("width");
                         if (width != nullptr) {
                             try {
-                                double oldWidth = width->getDouble(0);
+                                double oldWidth = width->getFloat(0);
                                 auto it = exchangeSegmentWidth.find(int(std::round(oldWidth * 1000.0)));
                                 if (it != exchangeSegmentWidth.end()) {
-                                    width->setDouble(0, it->second);
-                                    //width->elements[0] = new kicad::Value(std::to_string(it->second));
+                                    width->setFloat(0, it->second);
                                 }
                             } catch (std::exception &) {
                             }
@@ -480,11 +577,10 @@ int main(int argc, const char **argv) {
                         auto size = via->find("size");
                         if (size != nullptr) {
                             try {
-                                double oldSize = size->getDouble(0);
+                                double oldSize = size->getFloat(0);
                                 auto it = exchangeViaSize.find(int(std::round(oldSize * 1000.0)));
                                 if (it != exchangeViaSize.end()) {
-                                    //size->elements[0] = new kicad::Value(std::to_string(it->second));
-                                    size->setDouble(0, it->second);
+                                    size->setFloat(0, it->second);
                                 }
                             } catch (std::exception &) {
                             }
@@ -503,12 +599,12 @@ int main(int argc, const char **argv) {
                 for (auto &refFootprint : refFootprints) {
 
                     // generate net positions and places
-                    std::map<int, std::vector<float2>> netPositions;
+                    std::map<int, std::vector<double2>> netPositions;
                     std::list<Orientation> places;
                     /*for (auto &refFootprint : refFootprints)*/ {
                         // add net positions
                         for (auto &pad : refFootprint.pads) {
-                            float2 p = refFootprint.orientation.toGlobal(pad.position);
+                            double2 p = refFootprint.orientation.toGlobal(pad.position);
                             //std::cout << "pad " << pad.name << " " << p.x << " " << p.y << std::endl;
                             netPositions[pad.netNumber].push_back(p);
                         }
@@ -528,7 +624,7 @@ int main(int argc, const char **argv) {
 
                     while (!placementFootprints.empty() && !places.empty()) {
                         // find best placement (try all placement footprints on all available places)
-                        float bestDistance = std::numeric_limits<float>::max();
+                        double bestDistance = std::numeric_limits<double>::max();
                         std::list<Footprint>::iterator bestFootprint;
                         std::list<Orientation>::iterator bestPlace;
                         int bestFlip;
@@ -542,7 +638,7 @@ int main(int argc, const char **argv) {
                                 // also test flipped by 180 degrees
                                 for (int flip = 0; flip <= 1; ++flip) {
                                     // give capacitors a "head start" over resistors
-                                    float d = footprint.reference.starts_with("C") ? -1.0f : 0.0f;
+                                    double d = footprint.reference.starts_with("C") ? -1.0f : 0.0f;
 
                                     // calculate distance sum
                                     for (auto &pad : footprint.pads) {
@@ -550,7 +646,7 @@ int main(int argc, const char **argv) {
                                         orientation.rotation += flip ? 180.0f : 0.0f;
                                         auto padPosition = orientation.toGlobal(pad.position);
 
-                                        float padDistance = 100.0f;
+                                        double padDistance = 100.0f;
                                         if (pad.netNumber >= 0) {
                                             for (auto &netPosition : netPositions[pad.netNumber]) {
                                                 padDistance = std::min(padDistance, distance(padPosition, netPosition));

@@ -1,9 +1,9 @@
-//#include <OpenXLSX/OpenXLSX.hpp> // https://github.com/troldal/OpenXLSX
 #include <xlnt/xlnt.hpp> // https://github.com/tfussell/xlnt
 #include <fstream>
 #include <filesystem>
 #include <iostream>
 #include <regex>
+#include <set>
 #include "kicad.hpp"
 
 
@@ -11,10 +11,30 @@ namespace fs = std::filesystem;
 
 constexpr double pi = 3.1416f;
 
+// schematic
+
+// get the value of a cell in a worksheet, also when it is part of a merged range
+std::string getCellValue(const xlnt::worksheet &sheet, int row, int col) {
+    xlnt::cell_reference ref(col, row);
+
+    // check merged ranges
+    auto mergedRanges = sheet.merged_ranges();
+    for (const auto& range : mergedRanges) {
+        auto tl = range.top_left();
+        auto br = range.bottom_right();
+        if (tl.row() <= row && tl.column() <= col && br.row() >= row && br.column() >= col) {
+            ref = tl;
+            break;
+        }
+    }
+
+    return sheet[ref].to_string();
+}
 
 struct Properties {
     std::string manufacturer;
     std::string mfrPn;
+    std::string description;
     std::string datasheet;
     std::string lcscPn;
 };
@@ -31,9 +51,53 @@ void addProperty(kicad::Container *symbol, kicad::Container *property, std::stri
     } else {
         property->setString(1, value);
     }
-
 }
 
+
+
+struct Symbol {
+    Symbol(std::string_view reference) : reference(reference) {}
+
+    std::string reference;
+
+    double minVoltage = std::numeric_limits<double>::max();
+    double maxVoltage = -std::numeric_limits<double>::max();
+    bool fixedVoltage = false;
+
+    std::set<int> nets;
+
+    bool setVoltage(double minVoltage, double maxVoltage) {
+        if (this->fixedVoltage)
+            return false;
+
+        bool changed = false;
+        if (minVoltage < this->minVoltage) {
+            this->minVoltage = minVoltage;
+            changed = true;
+        }
+        if (maxVoltage > this->maxVoltage) {
+            this->maxVoltage = maxVoltage;
+            changed = true;
+        }
+        return changed;
+    }
+
+    bool setVoltage(double voltage) {
+        return setVoltage(voltage, voltage);
+    }
+
+    bool voltageValid() {
+        return this->minVoltage != std::numeric_limits<double>::max()
+            && this->maxVoltage != -std::numeric_limits<double>::max();
+    }
+
+    double voltage() {
+        return this->maxVoltage - this->minVoltage;
+    }
+};
+
+
+// pcb
 
 template <typename T>
 struct Vector2 {
@@ -255,6 +319,8 @@ int main(int argc, const char **argv) {
 
     // schematic options
     std::map<std::string, std::string> exchangeFootprint;
+    std::map<std::string, double> netVoltages;
+    std::map<std::string, std::pair<double, double>> symbolVoltages;
     std::map<std::string, Properties> importedBom;
 
     // pcb options
@@ -275,40 +341,36 @@ int main(int argc, const char **argv) {
             // exchange footprint
             i += 2;
             exchangeFootprint[argv[i - 1]] = argv[i];
+        } else if (arg == "-nv") {
+            // define net voltage
+            i += 2;
+            netVoltages[argv[i - 1]] = std::stod(argv[i]);
+        } else if (arg == "-sv") {
+            // define symbol voltage
+            i += 3;
+            symbolVoltages[argv[i - 2]] = {std::stod(argv[i - 1]), std::stod(argv[i])};
         } else if (arg == "-ijb") {
             // import JLCPCB BOM
             ++i;
             fs::path xlsPath = argv[i];
-            /*OpenXLSX::XLDocument doc;
-            doc.open(xlsPath.string());
-            if (doc.isOpen()) {
-                auto sheet = doc.workbook().sheet(1).get<OpenXLSX::XLWorksheet>();
-                for (uint32_t row = 6; row <= sheet.rowCount(); ++row) {
-                    auto references = sheet.cell(row, 1).value().get<std::string>();
-                    auto manufacturer = sheet.cell(row, 8).value().get<std::string>();
-                    auto mfrPn = sheet.cell(row, 7).value().get<std::string>();
-                    auto datasheet = sheet.cell(row, 14).value().get<std::string>();
-                    auto lcscPn = sheet.cell(row, 13).value().get<std::string>();
-
-                    // split references (designators) by comma
-                    std::stringstream ss(references);
-                    while (ss.good()) {
-                        std::string reference;
-                        std::getline(ss, reference, ',');
-                        importedBom[reference] = {manufacturer, mfrPn, datasheet, lcscPn};
-                    }
-                }
-                doc.close();
-            }*/
             xlnt::workbook wb;
             wb.load(xlsPath);
             auto sheet = wb.active_sheet();
             for (uint32_t row = 6; row <= sheet.highest_row(); ++row) {
-                auto references = sheet[xlnt::cell_reference(1, row)].to_string();
-                auto manufacturer = sheet[xlnt::cell_reference(8, row)].to_string();
-                auto mfrPn = sheet[xlnt::cell_reference(7, row)].to_string();
-                auto datasheet = sheet[xlnt::cell_reference(14, row)].to_string();
-                auto lcscPn = sheet[xlnt::cell_reference(13, row)].to_string();
+                auto references = getCellValue(sheet, row, 1);
+                auto manufacturer = getCellValue(sheet, row, 8);
+                auto mfrPn = getCellValue(sheet, row, 7);
+                auto description = getCellValue(sheet, row, 10);
+                auto datasheet = getCellValue(sheet, row, 14);
+                auto lcscPn = getCellValue(sheet, row, 13);
+
+                // split references (designators) by comma
+                std::stringstream ss(references);
+                while (ss.good()) {
+                    std::string reference;
+                    std::getline(ss, reference, ',');
+                    importedBom[reference] = {manufacturer, mfrPn, description, datasheet, lcscPn};
+                }
             }
         } else if (arg == "-rsw") {
             // exchange segment width
@@ -370,8 +432,14 @@ int main(int argc, const char **argv) {
         }
     }
 
+    bool defineVoltages = !netVoltages.empty();
+    std::list<Symbol> symbols;
+    std::map<int, std::set<Symbol *>> netToSymbols;
+    std::map<std::string, Symbol *> referenceToSymbol;
+
     bool hasExchangeSegmentWidth = !exchangeSegmentWidth.empty();
     bool hasExchangeViaSize = !exchangeViaSize.empty();
+
     if (paths.empty() || argc < 4) {
         std::cout << "Usage: pcb-tool [options] schematic.kicad_sch layout.kicad_pcb ..." << std::endl;
         std::cout << "    -xfp <old footprint> <new footprint>           Exchange footprint (only schematic)" << std::endl;
@@ -417,8 +485,10 @@ int main(int argc, const char **argv) {
                         double y = 0;
                         kicad::Container *manufacturer = nullptr;
                         kicad::Container *mfrPn = nullptr;
+                        kicad::Container *description = nullptr;
                         kicad::Container *datasheet = nullptr;
                         kicad::Container *lcscPn = nullptr;
+                        kicad::Container *voltage = nullptr;
                         //for (auto element2 : symbol->elements) {
                         auto it = symbol->elements.begin();
                         while (it != symbol->elements.end()) {
@@ -450,24 +520,44 @@ int main(int argc, const char **argv) {
                                     } else if (propertyName == "Mfr. PN") {
                                         mfrPn = property;
                                         //next = symbol->elements.erase(it);
+                                    } else if (propertyName == "Description") {
+                                        description = property;
                                     } else if (propertyName == "Datasheet") {
-                                            datasheet = property;
+                                        datasheet = property;
                                     } else if (propertyName == "LCSC PN") {
                                         lcscPn = property;
                                         //next = symbol->elements.erase(it);
+                                    } else if (propertyName == "Voltage") {
+                                        if (voltage)
+                                            next = symbol->elements.erase(it);
+                                        else
+                                            voltage = property;
                                     }
                                 }
                             }
                             it = next;
                         }
 
+                        // add properties from imported bom
                         {
                             auto it = importedBom.find(reference);
                             if (it != importedBom.end()) {
                                 addProperty(symbol, manufacturer, "Manufacturer", it->second.manufacturer, x, y);
                                 addProperty(symbol, mfrPn, "Mfr. PN", it->second.mfrPn, x, y);
+                                addProperty(symbol, description, "Description", it->second.description, x, y);
                                 addProperty(symbol, datasheet, "Datasheet", it->second.datasheet, x, y);
                                 addProperty(symbol, lcscPn, "LCSC PN", it->second.lcscPn, x, y);
+                            }
+                        }
+
+                        // add voltage
+                        {
+                            auto it = referenceToSymbol.find(reference);
+                            if (it != referenceToSymbol.end()) {
+                                auto sym = it->second;
+                                if (sym->voltageValid()) {
+                                    addProperty(symbol, voltage, "Voltage", std::to_string(sym->voltage()), x, y);
+                                }
                             }
                         }
                     }
@@ -476,6 +566,9 @@ int main(int argc, const char **argv) {
         }
 
         if (isPcb) {
+            symbols.clear();
+            netToSymbols.clear();
+
             double2 moveFootprintPosition = {};
             for (auto element1 : file.elements) {
                 auto container1 = dynamic_cast<kicad::Container *>(element1);
@@ -493,11 +586,12 @@ int main(int argc, const char **argv) {
                         double rotation = 0;
                         std::string reference;
                         std::string value;
+                        bool excludeFromBom = false;
                         for (auto element2 : footprint->elements) {
-                            auto container2 = dynamic_cast<kicad::Container *>(element2);
-                            if (container2) {
-                                if (container2->id == "at") {
-                                    auto at = container2;
+                            auto property = dynamic_cast<kicad::Container *>(element2);
+                            if (property) {
+                                if (property->id == "at") {
+                                    auto at = property;
 
                                     // move footprint away
                                     if (match(footprintName, moveFootprint)) {
@@ -510,8 +604,7 @@ int main(int argc, const char **argv) {
                                     position.x = at->getFloat(0);
                                     position.y = at->getFloat(1);
                                     rotation = at->getFloat(2);
-                                } else if (container2->id == "property") {
-                                    auto property = container2;
+                                } else if (property->id == "property") {
                                     std::string propertyName = property->getString(0);
                                     if (propertyName == "Reference") {
                                         // get reference and hide if requested
@@ -531,8 +624,26 @@ int main(int argc, const char **argv) {
                                         // get reference and hide if requested
                                         value = property->getString(1);
                                     }
+                                } else if (property->id == "attr") {
+                                    //doNotPopulate = property->contains("dnp");
+                                    excludeFromBom = property->contains("exclude_from_bom");
+                                    //throughHole = property->contains("through_hole");
                                 }
+
                             }
+                        }
+
+                        // define voltage
+                        Symbol *symbol = nullptr;
+                        if (!excludeFromBom) {
+                            symbol = &symbols.emplace_back(reference);
+                            if (symbolVoltages.contains(reference)) {
+                                // set voltage if it is defined for the symbol
+                                auto &voltage = symbolVoltages[reference];
+                                symbol->setVoltage(voltage.first, voltage.second);
+                                symbol->fixedVoltage = true;
+                            }
+                            referenceToSymbol[reference] = symbol;
                         }
 
                         // iterate over pads of footprint
@@ -547,7 +658,23 @@ int main(int argc, const char **argv) {
 
                                     auto net = pad->find("net");
                                     if (net != nullptr) {
+                                        auto netNumber = net->getInt(0);
                                         auto netName = net->getString(1);
+
+                                        // define voltage
+                                        if (symbol != nullptr) {
+                                            if (netVoltages.contains(netName)) {
+                                                // set voltage if it is defined for the net
+                                                symbol->setVoltage(netVoltages[netName]);
+                                            } else {
+                                                // add net unless it is an input
+                                                auto pinType = pad->findString("pintype");
+                                                if (pinType != "input") {
+                                                    symbol->nets.insert(netNumber);
+                                                }
+                                                netToSymbols[netNumber].insert(symbol);
+                                            }
+                                        }
 
                                         // remove net from pad if requested
                                         if (match(netName, removeNet)) {
@@ -588,6 +715,31 @@ int main(int argc, const char **argv) {
                     }
                 }
             }
+
+            // define voltages
+            bool changed;
+            do {
+                changed = false;
+                for (auto &symbol : symbols) {
+                    for (auto net : symbol.nets) {
+                        auto &symbols2 = netToSymbols[net];
+                        for (auto symbol2 : symbols2) {
+                            double oldMin = symbol2->minVoltage;
+                            double oldMax = symbol2->maxVoltage;
+                            bool valid = symbol2->voltageValid();
+                            bool c = symbol2->setVoltage(symbol.minVoltage, symbol.maxVoltage);
+                            if (c) {
+                                std::cout << symbol.reference << " changes voltage of " << symbol2->reference;
+                                if (valid)
+                                    std::cout << " from [" << oldMin << ' ' << oldMax << "]";
+                                std::cout << " to [" << symbol2->minVoltage << ' ' << symbol2->maxVoltage << ']' << std::endl;
+                            }
+
+                            changed |= c;
+                        }
+                    }
+                }
+            } while (changed);
 
             // automatic placement of resistors and capacitors
             if (!templates.empty()) {

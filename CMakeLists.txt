@@ -13,7 +13,6 @@ set(CMAKE_CXX_STANDARD 20)
 
 
 # dependencies
-#find_package(OpenXLSX CONFIG)
 find_package(xlnt CONFIG)
 
 add_subdirectory(src)

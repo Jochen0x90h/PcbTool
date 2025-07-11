@@ -4,7 +4,6 @@ add_executable(${PROJECT_NAME}
     kicad.hpp
 )
 target_link_libraries(${PROJECT_NAME}
-   #OpenXLSX::OpenXLSX
    xlnt::xlnt
 )
 

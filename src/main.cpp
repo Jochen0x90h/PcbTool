@@ -11,9 +11,33 @@ namespace fs = std::filesystem;
 
 constexpr double pi = 3.1416f;
 
+// check if a string matches at least one regluar expression in the list
+bool match(const std::string &str, const std::list<std::regex> &list) {
+    for (auto regex : list) {
+        if (std::regex_match(str, regex))
+            return true;
+    }
+    return false;
+}
+
+
 // schematic
 
-// get the value of a cell in a worksheet, also when it is part of a merged range
+struct NetVoltage {
+    std::regex net;
+    double voltage;
+};
+
+std::optional<double> match(const std::string &str, const std::list<NetVoltage> &netVoltages) {
+    for (auto &netVoltage : netVoltages) {
+        if (std::regex_match(str, netVoltage.net)) {
+            return netVoltage.voltage;
+        }
+    }
+    return {};
+}
+
+// get the value of a cell in an excel, also when it is part of a merged range
 std::string getCellValue(const xlnt::worksheet &sheet, int row, int col) {
     xlnt::cell_reference ref(col, row);
 
@@ -30,6 +54,12 @@ std::string getCellValue(const xlnt::worksheet &sheet, int row, int col) {
 
     return sheet[ref].to_string();
 }
+
+struct Sheet {
+    fs::path path;
+    kicad::Container file;
+    std::string uuidPath;
+};
 
 struct Properties {
     std::string manufacturer;
@@ -208,22 +238,6 @@ struct Template {
 };
 
 
-// remove quotes from string
-std::string clean(std::string_view s) {
-    if (s.size() >= 2 && s.front() == '"' && s.back() == '"')
-        return std::string(s.substr(1, s.size() - 2));
-    return std::string(s);
-}
-
-// check if a string matches at least one regluar expression in the list
-bool match(const std::string &str, const std::list<std::regex> &list) {
-    for (auto regex : list) {
-        if (std::regex_match(str, regex))
-            return true;
-    }
-    return false;
-}
-
 
 void getFootprints(kicad::Container &file, std::list<Footprint>& refFootprints,
     std::list<Footprint> &placementFootprints)
@@ -319,7 +333,8 @@ int main(int argc, const char **argv) {
 
     // schematic options
     std::map<std::string, std::string> exchangeFootprint;
-    std::map<std::string, double> netVoltages;
+    std::list<NetVoltage> netVoltages;
+    //std::map<std::string, double> netVoltages;
     std::map<std::string, std::pair<double, double>> symbolVoltages;
     std::map<std::string, Properties> importedBom;
 
@@ -329,6 +344,9 @@ int main(int argc, const char **argv) {
     std::list<std::regex> hideReference;
     std::list<std::regex> removeNet;
     std::list<std::regex> moveFootprint;
+
+    // schematic and pcb options
+    std::list<std::regex> removeProperty;
 
     std::list<Template> templates;
 
@@ -344,7 +362,8 @@ int main(int argc, const char **argv) {
         } else if (arg == "-nv") {
             // define net voltage
             i += 2;
-            netVoltages[argv[i - 1]] = std::stod(argv[i]);
+            //netVoltages[argv[i - 1]] = std::stod(argv[i]);
+            netVoltages.emplace_back(std::regex(argv[i - 1]), std::stod(argv[i]));
         } else if (arg == "-sv") {
             // define symbol voltage
             i += 3;
@@ -403,8 +422,13 @@ int main(int argc, const char **argv) {
             ++i;
             removeNet.emplace_back(argv[i]);
         } else if (arg == "-mfp") {
+            // move footprint to top-left corner
             ++i;
             moveFootprint.emplace_back(argv[i]);
+        } else if (arg == "-rp") {
+            // remove property
+            ++i;
+            removeProperty.emplace_back(argv[i]);
         } else if (arg == "-t") {
             // template
             ++i;
@@ -460,19 +484,71 @@ int main(int argc, const char **argv) {
             return 1;
         }
 
-        // read .kicad_pcb file
         std::cout << "Read " << path.string() << std::endl;
-        std::ifstream in(path.string());
-        if (!in) {
-            // error
-            return 1;
-        }
-        kicad::Container file;
-        kicad::readFile(in, file);
-        in.close();
-
         if (isSchematic) {
-            for (auto element1 : file.elements) {
+            std::string projectName = path.stem().string();
+            std::list<Sheet> sheets;
+
+            // read toplevel sheet
+            std::ifstream in(path.string());
+            if (!in) {
+                // error
+                std::cout << "Can't read file " << path.string() << std::endl;
+                return 1;
+            }
+            auto &toplevelSheet = sheets.emplace_back(path);
+            kicad::readFile(in, toplevelSheet.file);
+            in.close();
+
+            // load other sheets
+            for (auto element1 : toplevelSheet.file.elements) {
+                auto container1 = dynamic_cast<kicad::Container *>(element1);
+                if (container1) {
+                    if (container1->id == "uuid") {
+                        // toplevel UUID
+                        toplevelSheet.uuidPath = '/' + container1->getString(0);
+                    } else if (container1->id == "sheet") {
+                        // sheet
+                        auto sheet = container1;
+                        for (auto element2 : sheet->elements) {
+                            auto property = dynamic_cast<kicad::Container *>(element2);
+                            if (property != nullptr) {
+                                if (property->id == "property") {
+                                    auto propertyName = property->getString(0);
+                                    if (propertyName == "Sheetfile") {
+                                        fs::path sheetPath = path.parent_path() / property->getString(1);
+
+                                        std::cout << "Read sheet " << sheetPath.string() << std::endl;
+                                        std::ifstream in(sheetPath.string());
+                                        if (!in) {
+                                            // error
+                                            std::cout << "Can't read sheet " << sheetPath.string() << std::endl;
+                                            return 1;
+                                        }
+                                        auto &sheet = sheets.emplace_back(sheetPath);
+                                        kicad::readFile(in, sheet.file);
+                                        in.close();
+
+                                        // get UUID path of sheet
+                                        for (auto element1 : sheet.file.elements) {
+                                            auto container1 = dynamic_cast<kicad::Container *>(element1);
+                                            if (container1) {
+                                                if (container1->id == "uuid") {
+                                                    sheet.uuidPath = toplevelSheet.uuidPath + '/' + container1->getString(0);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // process each sheet
+            for (auto &sheet : sheets)
+            for (auto element1 : sheet.file.elements) {
                 auto container1 = dynamic_cast<kicad::Container *>(element1);
                 if (container1) {
                     // check if it is a symbol
@@ -489,7 +565,6 @@ int main(int argc, const char **argv) {
                         kicad::Container *datasheet = nullptr;
                         kicad::Container *lcscPn = nullptr;
                         kicad::Container *voltage = nullptr;
-                        //for (auto element2 : symbol->elements) {
                         auto it = symbol->elements.begin();
                         while (it != symbol->elements.end()) {
                             auto property = dynamic_cast<kicad::Container *>(*it);//element2);
@@ -497,11 +572,13 @@ int main(int argc, const char **argv) {
                             ++next;
                             if (property != nullptr) {
                                 if (property->id == "at") {
+                                    // position
                                     x = property->getFloat(0);
                                     y = property->getFloat(1);
-                                }
-                                if (property->id == "property") {
+                                } else if (property->id == "property") {
+                                    // property
                                     auto propertyName = property->getString(0);
+
                                     if (propertyName == "Reference") {
                                         reference = property->getString(1);
                                     } else if (propertyName == "Footprint") {
@@ -511,28 +588,41 @@ int main(int argc, const char **argv) {
                                         auto it = exchangeFootprint.find(footprintName);
                                         if (it != exchangeFootprint.end()) {
                                             std::cout << "Replace footprint " << it->first << " by " << it->second << std::endl;
-                                            //footprint->elements[1] = new kicad::Value('"' + it->second + '"');
                                             footprint->setString(1, it->second);
                                         }
-                                    } else if (propertyName == "Manufacturer") {
-                                        manufacturer = property;
-                                        //next = symbol->elements.erase(it);
-                                    } else if (propertyName == "Mfr. PN") {
-                                        mfrPn = property;
-                                        //next = symbol->elements.erase(it);
                                     } else if (propertyName == "Description") {
                                         description = property;
                                     } else if (propertyName == "Datasheet") {
                                         datasheet = property;
-                                    } else if (propertyName == "LCSC PN") {
-                                        lcscPn = property;
-                                        //next = symbol->elements.erase(it);
-                                    } else if (propertyName == "Voltage") {
-                                        if (voltage)
+                                    } else {
+                                        // check if property should be removed (only allowed for the following custom properties)
+                                        if (match(propertyName, removeProperty)) {
                                             next = symbol->elements.erase(it);
-                                        else
-                                            voltage = property;
+                                        } else {
+                                            if (propertyName == "Manufacturer") {
+                                                manufacturer = property;
+                                            } else if (propertyName == "Mfr. PN") {
+                                                mfrPn = property;
+                                            } else if (propertyName == "LCSC PN") {
+                                                lcscPn = property;
+                                            } else if (propertyName == "Voltage") {
+                                                voltage = property;
+                                            }
+                                        }
                                     }
+                                } else if (property->id == "instances") {
+                                    /*if (property->elements.size() > 1) {
+                                        std::cout << "Warning: " << reference << " has more than one instance" << std::endl;
+                                        property->elements.resize(1);
+                                    }
+                                    if (!property->elements.empty()) {
+                                        auto project = property->find("project");
+                                        if (project) {
+                                            project->setString(0, projectName);
+                                            auto path = project->find("path");
+                                            path->setString(0, sheet.uuidPath);
+                                        }
+                                    }*/
                                 }
                             }
                             it = next;
@@ -556,16 +646,41 @@ int main(int argc, const char **argv) {
                             if (it != referenceToSymbol.end()) {
                                 auto sym = it->second;
                                 if (sym->voltageValid()) {
-                                    addProperty(symbol, voltage, "Voltage", std::to_string(sym->voltage()), x, y);
+                                    std::stringstream ss;
+                                    ss << sym->voltage();
+                                    addProperty(symbol, voltage, "Voltage", ss.str(), x, y);
                                 }
                             }
                         }
                     }
                 }
             }
+
+            // write sheets
+            for (auto &sheet : sheets) {
+                std::cout << "Write " << sheet.path.string() << std::endl;
+                std::ofstream out(sheet.path.string());
+                if (!out) {
+                    // error
+                    return 1;
+                }
+                kicad::writeFile(out, sheet.file);
+                out.close();
+            }
         }
 
         if (isPcb) {
+            // read pcb file
+            std::ifstream in(path.string());
+            if (!in) {
+                // error
+                std::cout << "Can't read file " << path.string() << std::endl;
+                return 1;
+            }
+            kicad::Container file;
+            kicad::readFile(in, file);
+            in.close();
+
             symbols.clear();
             netToSymbols.clear();
 
@@ -635,7 +750,7 @@ int main(int argc, const char **argv) {
 
                         // define voltage
                         Symbol *symbol = nullptr;
-                        if (!excludeFromBom) {
+                        if (defineVoltages && !excludeFromBom) {
                             symbol = &symbols.emplace_back(reference);
                             if (symbolVoltages.contains(reference)) {
                                 // set voltage if it is defined for the symbol
@@ -663,9 +778,10 @@ int main(int argc, const char **argv) {
 
                                         // define voltage
                                         if (symbol != nullptr) {
-                                            if (netVoltages.contains(netName)) {
+                                            auto v = match(netName, netVoltages);
+                                            if (v) {
                                                 // set voltage if it is defined for the net
-                                                symbol->setVoltage(netVoltages[netName]);
+                                                symbol->setVoltage(*v);
                                             } else {
                                                 // add net unless it is an input
                                                 auto pinType = pad->findString("pintype");
@@ -842,17 +958,17 @@ int main(int argc, const char **argv) {
                     o.position.y += 2;
                 }*/
             }
-        }
 
-        // write .kicad_sch or .kicad_pcb file
-        std::cout << "Write " << path.string() << std::endl;
-        std::ofstream out(path.string());
-        if (!out) {
-            // error
-            return 1;
+            // write pcb file
+            std::cout << "Write " << path.string() << std::endl;
+            std::ofstream out(path.string());
+            if (!out) {
+                // error
+                return 1;
+            }
+            kicad::writeFile(out, file);
+            out.close();
         }
-        kicad::writeFile(out, file);
-        out.close();
     }
     return 0;
 }

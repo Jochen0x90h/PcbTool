@@ -163,6 +163,13 @@ int Value::count() {
     return 1;
 }
 
+void Value::sweep() {
+}
+
+void Value::write(std::ostream &s, int indent) {
+    s << this->value;
+}
+
 std::string Value::getString(std::string_view defaultValue) {
     // remove quotes
     int size = this->value.size();
@@ -178,22 +185,12 @@ void Value::setString(std::string_view value) {
     this->value += '"';
 }
 
-void Value::write(std::ostream &s, int indent) {
-    s << this->value;
-}
 
 
 // Container
 
 Container::~Container() {
     clear();
-}
-
-void Container::clear() {
-    for (auto element : this->elements) {
-        delete element;
-    }
-    this->elements.clear();
 }
 
 int Container::count() {
@@ -204,6 +201,49 @@ int Container::count() {
     return c;
 }
 
+void Container::sweep() {
+    auto dst = this->elements.begin();
+    for (auto src = dst; src != this->elements.end(); ++src) {
+        if ((*src)->action == Action::DELETE) {
+            delete *src;
+        } else {
+            (*src)->sweep();
+            *dst = *src;
+            ++dst;
+        }
+    }
+    this->elements.erase(dst, this->elements.end());
+}
+
+void Container::write(std::ostream &s, int indent) {
+    bool multiLine = count() > 16;
+
+    s << '(' << this->id;
+
+    bool multiline2 = false;
+    for (auto element : this->elements) {
+        multiline2 |= dynamic_cast<Container *>(element) != nullptr;
+
+        if (multiLine && multiline2) {
+            newLine(s, indent + 1);
+        } else {
+            s << ' ';
+        }
+
+        element->write(s, indent + 1);
+    }
+    if (multiLine && multiline2) {
+        newLine(s, indent);
+    }
+    s << ')';
+}
+
+void Container::clear() {
+    for (auto element : this->elements) {
+        delete element;
+    }
+    this->elements.clear();
+}
 
 Container *Container::add(std::string_view id) {
     auto container = new Container(id);
@@ -370,29 +410,6 @@ void Container::erase(std::string_view id) {
             ++it;
         }
     }
-}
-
-void Container::write(std::ostream &s, int indent) {
-    bool multiLine = count() > 16;
-
-    s << '(' << this->id;
-
-    bool multiline2 = false;
-    for (auto element : this->elements) {
-        multiline2 |= dynamic_cast<Container *>(element) != nullptr;
-
-        if (multiLine && multiline2) {
-            newLine(s, indent + 1);
-        } else {
-            s << ' ';
-        }
-
-        element->write(s, indent + 1);
-    }
-    if (multiLine && multiline2) {
-        newLine(s, indent);
-    }
-    s << ')';
 }
 
 void Container::newLine(std::ostream &s, int indent) {

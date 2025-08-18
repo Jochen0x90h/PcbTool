@@ -19,10 +19,16 @@ class Element {
 public:
 
     virtual ~Element() {}
-
     virtual int count() = 0;
-
+    virtual void sweep() = 0;
     virtual void write(std::ostream &s, int indent) = 0;
+
+    enum class Action {
+        NONE,
+        KEEP,
+        DELETE,
+    };
+    Action action = Action::NONE;
 };
 
 
@@ -31,15 +37,15 @@ public:
     Value() = default;
     Value(std::string_view value) : value(value) {}
 
-    virtual ~Value();
-
+    ~Value() override;
     int count() override;
+    void sweep() override;
+    void write(std::ostream &s, int indent) override;
 
     std::string getString(std::string_view defaultValue = {});
 
     void setString(std::string_view value);
 
-    void write(std::ostream &s, int indent) override;
 
     std::string value;
 };
@@ -59,10 +65,14 @@ public:
     Container(const Container &) = delete;
 
     virtual ~Container();
+    int count() override;
+    void sweep() override;
+    void write(std::ostream &s, int indent) override;
+
+
 
     void clear();
 
-    int count() override;
 
     /// @brief Add a new element
     /// @param element
@@ -227,7 +237,6 @@ public:
     void erase(std::string_view id);
 
 
-    void write(std::ostream &s, int indent) override;
     static void newLine(std::ostream &s, int indent);
 
 

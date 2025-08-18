@@ -1,4 +1,5 @@
 #include <xlnt/xlnt.hpp> // https://github.com/tfussell/xlnt
+#include <nlohmann/json.hpp>
 #include <fstream>
 #include <filesystem>
 #include <iostream>
@@ -8,8 +9,9 @@
 
 
 namespace fs = std::filesystem;
-
+using json = nlohmann::json;
 constexpr double pi = 3.1416f;
+
 
 // check if a string matches at least one regluar expression in the list
 bool match(const std::string &str, const std::list<std::regex> &list) {
@@ -337,9 +339,6 @@ void getFootprints(kicad::Container &file, std::list<Footprint>& refFootprints,
 
 
 int main(int argc, const char **argv) {
-    //if (argc < 2)
-    //    return 1;
-
     // schematic options
     std::map<std::string, std::string> exchangeFootprint;
     std::list<NetVoltage> netVoltages;
@@ -468,6 +467,10 @@ int main(int argc, const char **argv) {
         }
     }
 
+    // project
+    std::map<std::string, std::string> sheetUuidMap;
+
+    // voltage propagation
     bool defineVoltages = !netVoltages.empty();
     std::list<Symbol> symbols;
     std::map<int, std::set<Symbol *>> netToSymbols;
@@ -490,37 +493,55 @@ int main(int argc, const char **argv) {
     }
 
     for (auto &path : paths) {
-        bool isSchematic = path.extension() == ".kicad_sch";
-        bool isPcb = path.extension() == ".kicad_pcb";
+        auto ext = path.extension();
+        bool isProject = ext == ".kicad_pro";
+        bool isSchematic = ext == ".kicad_sch";
+        bool isPcb = ext == ".kicad_pcb";
 
-        if (!isSchematic && !isPcb) {
+        if (!isProject && !isSchematic && !isPcb) {
             std::cout << "Error: File type of " << path.string() << " not supported" << std::endl;
             return 1;
         }
 
         std::cout << "Read " << path.string() << std::endl;
-        if (isSchematic) {
+        if (isProject) {
+            // read project
+            std::ifstream is(path.string());
+            if (is.is_open()) {
+                try {
+                    json j = json::parse(is);
+                    json sheets = j.at("sheets");
+                    for (int i = 0; i < sheets.size(); ++i) {
+                        json sheet = sheets.at(i);
+                        std::string uuid = sheet.at(0).get<std::string>();
+                        std::string name = sheet.at(1).get<std::string>();
+                        sheetUuidMap[name] = uuid;
+                    }
+                } catch (std::exception &e) {
+                }
+            }
+        } else if (isSchematic) {
             std::string projectName = path.stem().string();
             std::map<int, Sheet> sheets;
 
-            // read toplevel sheet
+            // read root sheet
             std::ifstream in(path.string());
             if (!in) {
                 // error
                 std::cout << "Can't read file " << path.string() << std::endl;
                 return 1;
             }
-            auto &toplevelSheet = sheets.emplace(-1, path).first->second;
-            kicad::readFile(in, toplevelSheet.file);
+            auto &rootSheet = sheets.emplace(-1, path).first->second;
+            kicad::readFile(in, rootSheet.file);
             in.close();
+
+            // set UUID path of root sheet
+            rootSheet.uuidPath = '/' + sheetUuidMap["Root"];
 
             // load other sheets
             int rootPage =  -1;
-            for (auto container1 : toplevelSheet.file) {
-                if (container1->id == "uuid") {
-                    // toplevel UUID
-                    toplevelSheet.uuidPath = '/' + container1->getString(0);
-                } else if (container1->id == "sheet_instances") {
+            for (auto container1 : rootSheet.file) {
+                if (container1->id == "sheet_instances") {
                     auto path = container1->find("path");
                     if (path != nullptr) {
                         auto page = path->find("page");
@@ -530,13 +551,16 @@ int main(int argc, const char **argv) {
                     }
                 } else if (container1->id == "sheet") {
                     // sheet
+                    std::string sheetName;
                     fs::path sheetPath;
                     int sheetPage = -1;
                     auto properties = container1;
                     for (auto property : *properties) {
                         if (property->id == "property") {
                             auto propertyName = property->getString(0);
-                            if (propertyName == "Sheetfile") {
+                            if (propertyName == "Sheetname") {
+                                sheetName = property->getString(1);
+                            } else if (propertyName == "Sheetfile") {
                                 sheetPath = path.parent_path() / property->getString(1);
                             }
                         } else if (property->id == "instances") {
@@ -554,7 +578,7 @@ int main(int argc, const char **argv) {
                     }
 
                     // read sheet
-                    if (!sheetPath.empty() && sheetPage >= 0) {
+                    if (!sheetName.empty() && !sheetPath.empty() && sheetPage >= 0) {
                         std::cout << "Read sheet " << sheetPath.string() << " page " << sheetPage << std::endl;
                         std::ifstream in(sheetPath.string());
                         if (!in) {
@@ -566,11 +590,8 @@ int main(int argc, const char **argv) {
                         kicad::readFile(in, sheet.file);
                         in.close();
 
-                        // get UUID path of sheet
-                        auto uuid = sheet.file.find("uuid");
-                        if (uuid != nullptr) {
-                            sheet.uuidPath = toplevelSheet.uuidPath + '/' + uuid->getString(0);
-                        }
+                        // set UUID path of sheet
+                        sheet.uuidPath = rootSheet.uuidPath + '/' + sheetUuidMap[sheetName];
                     }
                 }
             }
@@ -590,7 +611,7 @@ int main(int argc, const char **argv) {
                 auto &sheet = p.second;
 
                 // symbol references sorted by y for schematic annotation
-                std::multimap<std::pair<double, double>, kicad::Value *> sortedReferences;
+                std::multimap<std::pair<double, double>, std::pair<kicad::Value *, kicad::Value *>> sortedReferences;
 
                 for (auto container1 : sheet.file) {
                     // check if it is a symbol
@@ -599,6 +620,7 @@ int main(int argc, const char **argv) {
 
                         // iterate over properties
                         std::string reference;
+                        int unit = -1;
                         double x = 0;
                         double y = 0;
                         kicad::Value *ref1 = nullptr;
@@ -609,83 +631,85 @@ int main(int argc, const char **argv) {
                         kicad::Container *datasheet = nullptr;
                         kicad::Container *lcscPn = nullptr;
                         kicad::Container *voltage = nullptr;
-                        auto it = symbol->elements.begin();
-                        while (it != symbol->elements.end()) {
-                            auto property = dynamic_cast<kicad::Container *>(*it);//element2);
-                            auto next = it;
-                            ++next;
-                            if (property != nullptr) {
-                                if (property->id == "at") {
-                                    // position
-                                    x = property->getNumber(0);
-                                    y = property->getNumber(1);
-                                } else if (property->id == "property") {
-                                    // property
-                                    auto propertyName = property->getString(0);
+                        for (auto property : *symbol) {
+                            if (property->id == "at") {
+                                // position
+                                x = property->getNumber(0);
+                                y = property->getNumber(1);
+                            } else if (property->id == "unit") {
+                                // unit index (parts with multiple units such as op amps or gates)
+                                if (unit == -1)
+                                    unit = property->getInt(0);
+                            } else if (property->id == "property") {
+                                // property
+                                auto propertyName = property->getString(0);
 
-                                    if (propertyName == "Reference") {
-                                        if (reference.empty())
-                                            reference = property->getString(1);
-                                        ref1 = dynamic_cast<kicad::Value *>(property->elements[1]);
-                                    } else if (propertyName == "Footprint") {
-                                        // replace footprint
-                                        auto footprint = property;
-                                        auto footprintName = footprint->getString(1);
-                                        auto it = exchangeFootprint.find(footprintName);
-                                        if (it != exchangeFootprint.end()) {
-                                            std::cout << "Replace footprint " << it->first << " by " << it->second << std::endl;
-                                            footprint->setString(1, it->second);
-                                        }
-                                    } else if (propertyName == "Description") {
-                                        description = property;
-                                    } else if (propertyName == "Datasheet") {
-                                        datasheet = property;
+                                if (propertyName == "Reference") {
+                                    // reference (e.g. "U1")
+                                    if (reference.empty())
+                                        reference = property->getString(1);
+                                    ref1 = dynamic_cast<kicad::Value *>(property->elements[1]);
+                                } else if (propertyName == "Footprint") {
+                                    // replace footprint
+                                    auto footprint = property;
+                                    auto footprintName = footprint->getString(1);
+                                    auto it = exchangeFootprint.find(footprintName);
+                                    if (it != exchangeFootprint.end()) {
+                                        std::cout << "Replace footprint " << it->first << " by " << it->second << std::endl;
+                                        footprint->setString(1, it->second);
+                                    }
+                                } else if (propertyName == "Description") {
+                                    description = property;
+                                } else if (propertyName == "Datasheet") {
+                                    datasheet = property;
+                                } else {
+                                    // check if property should be removed (only allowed for the following custom properties)
+                                    if (match(propertyName, removeProperty)) {
+                                        //next = symbol->elements.erase(it);
+                                        property->action = kicad::Element::Action::DELETE;
                                     } else {
-                                        // check if property should be removed (only allowed for the following custom properties)
-                                        if (match(propertyName, removeProperty)) {
-                                            next = symbol->elements.erase(it);
-                                        } else {
-                                            if (propertyName == "Manufacturer") {
-                                                manufacturer = property;
-                                            } else if (propertyName == "MPN") {
-                                                mpn = property;
-                                            } else if (propertyName == "LCSC PN") {
-                                                lcscPn = property;
-                                            } else if (propertyName == "Voltage") {
-                                                voltage = property;
-                                            }
+                                        if (propertyName == "Manufacturer") {
+                                            manufacturer = property;
+                                        } else if (propertyName == "MPN") {
+                                            mpn = property;
+                                        } else if (propertyName == "LCSC PN") {
+                                            lcscPn = property;
+                                        } else if (propertyName == "Voltage") {
+                                            voltage = property;
                                         }
                                     }
-                                } else if (property->id == "instances") {
-                                    // repair instances, need to copy uuids from project (.kicad_pro)
-                                    /*if (property->elements.size() > 1) {
-                                        std::cout << "Warning: " << reference << " has more than one instance" << std::endl;
-                                        property->elements.resize(1);
-                                    }
-                                    if (!property->elements.empty()) {
-                                        auto project = property->find("project");
-                                        if (project) {
+                                }
+                            } else if (property->id == "instances") {
+                                for (auto project : *property) {
+                                    // remove unused instances
+                                    //if (project->action == kicad::Element::Action::NONE)
+                                    //    project->action = kicad::Element::Action::DELETE;
+
+                                    // check if UUID path of instance matches
+                                    auto path = project->find("path");
+                                    if (path != nullptr && path->getString(0) == sheet.uuidPath) {
+                                        auto r = path->find("reference");
+                                        if (r != nullptr) {
+                                            // set project name
                                             project->setString(0, projectName);
-                                            auto path = project->find("path");
-                                            path->setString(0, sheet.uuidPath);
-                                        }
-                                    }*/
 
-                                    auto project = property->find("project");
-                                    if (project != nullptr) {
-                                        auto path = project->find("path");
-                                        if (path != nullptr) {
-                                            auto referenceContainer = path->find("reference");
-                                            if (referenceContainer != nullptr) {
-                                                reference = referenceContainer->getString(0);
-                                                ref2 = dynamic_cast<kicad::Value *>(referenceContainer->elements[0]);
-                                            }
+                                            // get reference
+                                            reference = r->getString(0);
+                                            std::cout << "Instance " << reference << std::endl;
+                                            ref2 = dynamic_cast<kicad::Value *>(r->elements[0]);
+
+                                            // keep instance
+                                            project->action = kicad::Element::Action::KEEP;
+                                        }
+
+                                        // get unit index
+                                        auto u = path->find("unit");
+                                        if (u != nullptr) {
+                                            unit = u->getInt(0);
                                         }
                                     }
-
                                 }
                             }
-                            it = next;
                         }
 
                         if (!reference.empty() && reference[0] != '#') {
@@ -715,14 +739,14 @@ int main(int argc, const char **argv) {
                             }
 
                             if (annotateSchematic) {
-                                if (ref1)
-                                    sortedReferences.insert({{y, x}, ref1});
-                                if (ref2)
-                                    sortedReferences.insert({{y, x}, ref2});
+                                sortedReferences.insert({{y, x}, {ref1, ref2}});
                             }
                         }
                     }
                 }
+
+                // delete all elements marked as DELETE
+                sheet.file.sweep();
 
                 // annotate schematic (assign references)
                 if (annotateSchematic) {
@@ -734,14 +758,12 @@ int main(int argc, const char **argv) {
                     }
 
                     for (auto &p : sortedReferences) {
-                        auto ref = p.second;
-                        auto reference = ref->getString();
+                        auto ref1 = p.second.first;
+                        auto ref2 = p.second.second;
+                        auto reference = (ref2 != nullptr ? ref2 : ref1)->getString();
 
                         // check if new reference already exists
-                        if (oldToNewReference.contains(reference)) {
-                            // use new reference
-                            ref->setString(oldToNewReference[reference]);
-                        } else {
+                        if (!oldToNewReference.contains(reference)) {
                             // create new reference
                             auto type = getType(reference);
                             int index = sheetPage;
@@ -751,10 +773,14 @@ int main(int argc, const char **argv) {
 
                             std::string newReference = type + std::to_string(index);
                             oldToNewReference[reference] = newReference;
-                            ref->setString(newReference);
 
                             nextReference[type] = index + 1;
                         }
+
+                        if (ref1 != nullptr)
+                            ref1->setString(oldToNewReference[reference]);
+                        if (ref2 != nullptr)
+                            ref2->setString(oldToNewReference[reference]);
                     }
                 }
             }

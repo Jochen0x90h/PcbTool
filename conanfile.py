@@ -13,6 +13,7 @@ class Project(ConanFile):
     generators = "CMakeDeps", "CMakeToolchain"
     exports_sources = "conanfile.py", "CMakeLists.txt", "src/*"
     requires = [
+        "nlohmann_json/3.12.0",
         #"openxlsx/0.4.1"
         "xlnt/1.5.0"
     ]

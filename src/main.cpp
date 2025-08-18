@@ -20,6 +20,15 @@ bool match(const std::string &str, const std::list<std::regex> &list) {
     return false;
 }
 
+// get type from reference, e.g. "C20" -> "C"
+std::string getType(std::string_view str) {
+    for (int i = 0; i < str.length(); ++i) {
+        char ch = str[i];
+        if (ch >= '0' && ch <= '9')
+            return std::string(str.substr(0, i));
+    }
+    return std::string(str);
+}
 
 // schematic
 
@@ -63,7 +72,7 @@ struct Sheet {
 
 struct Properties {
     std::string manufacturer;
-    std::string mfrPn;
+    std::string mpn;
     std::string description;
     std::string datasheet;
     std::string lcscPn;
@@ -76,7 +85,7 @@ void addProperty(kicad::Container *symbol, kicad::Container *property, std::stri
         property = symbol->add("property");
         property->setString(0, name);
         property->setString(1, value);
-        property->add("at")->addFloat(x).addFloat(y).addInt(0);
+        property->add("at")->addNumber(x).addNumber(y).addNumber(0);
         property->add("effects")->add("hide")->addTag("yes");
     } else {
         property->setString(1, value);
@@ -223,11 +232,11 @@ struct Footprint {
     std::vector<Pad> pads;
 
     void place(const Orientation &o) {
-        this->at->setFloat(0, o.position.x);
-        this->at->setFloat(1, o.position.y);
-        this->at->setFloat(2, o.rotation);
+        this->at->setNumber(0, o.position.x);
+        this->at->setNumber(1, o.position.y);
+        this->at->setNumber(2, o.rotation);
         for (auto &pad : pads) {
-            pad.at->setFloat(2, o.rotation);
+            pad.at->setNumber(2, o.rotation);
         }
     }
 };
@@ -265,9 +274,9 @@ void getFootprints(kicad::Container &file, std::list<Footprint>& refFootprints,
                     if (container2) {
                         if (container2->id == "at") {
                             at = container2;
-                            position.x = at->getFloat(0);
-                            position.y = at->getFloat(1);
-                            rotation = at->getFloat(2);
+                            position.x = at->getNumber(0);
+                            position.y = at->getNumber(1);
+                            rotation = at->getNumber(2);
                         } else if (container2->id == "property") {
                             auto property = container2;
                             std::string propertyName = property->getString(0);
@@ -299,8 +308,8 @@ void getFootprints(kicad::Container &file, std::list<Footprint>& refFootprints,
                                 // get pad position
                                 auto at = pad->find("at");
                                 //auto at = pad->findFloat2("at");
-                                auto x = at->getFloat(0);
-                                auto y = at->getFloat(1);
+                                auto x = at->getNumber(0);
+                                auto y = at->getNumber(1);
 
                                 // get net number
                                 int netNumber = -1;
@@ -328,15 +337,15 @@ void getFootprints(kicad::Container &file, std::list<Footprint>& refFootprints,
 
 
 int main(int argc, const char **argv) {
-    if (argc < 2)
-        return 1;
+    //if (argc < 2)
+    //    return 1;
 
     // schematic options
     std::map<std::string, std::string> exchangeFootprint;
     std::list<NetVoltage> netVoltages;
-    //std::map<std::string, double> netVoltages;
     std::map<std::string, std::pair<double, double>> symbolVoltages;
     std::map<std::string, Properties> importedBom;
+    bool annotateSchematic = false;
 
     // pcb options
     std::map<int, double> exchangeSegmentWidth;
@@ -378,7 +387,7 @@ int main(int argc, const char **argv) {
             for (uint32_t row = 6; row <= sheet.highest_row(); ++row) {
                 auto references = getCellValue(sheet, row, 1);
                 auto manufacturer = getCellValue(sheet, row, 8);
-                auto mfrPn = getCellValue(sheet, row, 7);
+                auto mpn = getCellValue(sheet, row, 7);
                 auto description = getCellValue(sheet, row, 10);
                 auto datasheet = getCellValue(sheet, row, 14);
                 auto lcscPn = getCellValue(sheet, row, 13);
@@ -388,9 +397,12 @@ int main(int argc, const char **argv) {
                 while (ss.good()) {
                     std::string reference;
                     std::getline(ss, reference, ',');
-                    importedBom[reference] = {manufacturer, mfrPn, description, datasheet, lcscPn};
+                    importedBom[reference] = {manufacturer, mpn, description, datasheet, lcscPn};
                 }
             }
+        } else if (arg == "-as") {
+            // annotate schematic
+            annotateSchematic = true;
         } else if (arg == "-rsw") {
             // exchange segment width
             i += 2;
@@ -464,9 +476,11 @@ int main(int argc, const char **argv) {
     bool hasExchangeSegmentWidth = !exchangeSegmentWidth.empty();
     bool hasExchangeViaSize = !exchangeViaSize.empty();
 
-    if (paths.empty() || argc < 4) {
+    if (paths.empty()) {
         std::cout << "Usage: pcb-tool [options] schematic.kicad_sch layout.kicad_pcb ..." << std::endl;
         std::cout << "    -xfp <old footprint> <new footprint>           Exchange footprint (only schematic)" << std::endl;
+        std::cout << "    -ijb <bom file>                                Import downloaded JLCPCB BOM Excel file (only schematic)" << std::endl;
+        std::cout << "    -as                                            Annotate schematic using sheet number as first number (only schematic)" << std::endl;
         std::cout << "    -xsw <old segment width> <new segment width>   Exchange segment width (only pcb)" << std::endl;
         std::cout << "    -xvs <old via size> <new via size>             Exchange segment width (only pcb)" << std::endl;
         std::cout << "    -hr <reference>                                Hide reference, supports regular expressions, e.g. R.* (only pcb)" << std::endl;
@@ -487,7 +501,7 @@ int main(int argc, const char **argv) {
         std::cout << "Read " << path.string() << std::endl;
         if (isSchematic) {
             std::string projectName = path.stem().string();
-            std::list<Sheet> sheets;
+            std::map<int, Sheet> sheets;
 
             // read toplevel sheet
             std::ifstream in(path.string());
@@ -496,61 +510,89 @@ int main(int argc, const char **argv) {
                 std::cout << "Can't read file " << path.string() << std::endl;
                 return 1;
             }
-            auto &toplevelSheet = sheets.emplace_back(path);
+            auto &toplevelSheet = sheets.emplace(-1, path).first->second;
             kicad::readFile(in, toplevelSheet.file);
             in.close();
 
             // load other sheets
-            for (auto element1 : toplevelSheet.file.elements) {
-                auto container1 = dynamic_cast<kicad::Container *>(element1);
-                if (container1) {
-                    if (container1->id == "uuid") {
-                        // toplevel UUID
-                        toplevelSheet.uuidPath = '/' + container1->getString(0);
-                    } else if (container1->id == "sheet") {
-                        // sheet
-                        auto sheet = container1;
-                        for (auto element2 : sheet->elements) {
-                            auto property = dynamic_cast<kicad::Container *>(element2);
-                            if (property != nullptr) {
-                                if (property->id == "property") {
-                                    auto propertyName = property->getString(0);
-                                    if (propertyName == "Sheetfile") {
-                                        fs::path sheetPath = path.parent_path() / property->getString(1);
-
-                                        std::cout << "Read sheet " << sheetPath.string() << std::endl;
-                                        std::ifstream in(sheetPath.string());
-                                        if (!in) {
-                                            // error
-                                            std::cout << "Can't read sheet " << sheetPath.string() << std::endl;
-                                            return 1;
-                                        }
-                                        auto &sheet = sheets.emplace_back(sheetPath);
-                                        kicad::readFile(in, sheet.file);
-                                        in.close();
-
-                                        // get UUID path of sheet
-                                        for (auto element1 : sheet.file.elements) {
-                                            auto container1 = dynamic_cast<kicad::Container *>(element1);
-                                            if (container1) {
-                                                if (container1->id == "uuid") {
-                                                    sheet.uuidPath = toplevelSheet.uuidPath + '/' + container1->getString(0);
-                                                }
-                                            }
-                                        }
+            int rootPage =  -1;
+            for (auto container1 : toplevelSheet.file) {
+                if (container1->id == "uuid") {
+                    // toplevel UUID
+                    toplevelSheet.uuidPath = '/' + container1->getString(0);
+                } else if (container1->id == "sheet_instances") {
+                    auto path = container1->find("path");
+                    if (path != nullptr) {
+                        auto page = path->find("page");
+                        if (page != nullptr) {
+                            rootPage = page->getInt(0, -1);
+                        }
+                    }
+                } else if (container1->id == "sheet") {
+                    // sheet
+                    fs::path sheetPath;
+                    int sheetPage = -1;
+                    auto properties = container1;
+                    for (auto property : *properties) {
+                        if (property->id == "property") {
+                            auto propertyName = property->getString(0);
+                            if (propertyName == "Sheetfile") {
+                                sheetPath = path.parent_path() / property->getString(1);
+                            }
+                        } else if (property->id == "instances") {
+                            auto project = property->find("project");
+                            if (project != nullptr) {
+                                auto path = project->find("path");
+                                if (path != nullptr) {
+                                    auto page = path->find("page");
+                                    if (page != nullptr) {
+                                        sheetPage = page->getInt(0, -1);
                                     }
                                 }
                             }
                         }
                     }
+
+                    // read sheet
+                    if (!sheetPath.empty() && sheetPage >= 0) {
+                        std::cout << "Read sheet " << sheetPath.string() << " page " << sheetPage << std::endl;
+                        std::ifstream in(sheetPath.string());
+                        if (!in) {
+                            // error
+                            std::cout << "Can't read sheet " << sheetPath.string() << std::endl;
+                            return 1;
+                        }
+                        auto &sheet = sheets.emplace(sheetPage, sheetPath).first->second;
+                        kicad::readFile(in, sheet.file);
+                        in.close();
+
+                        // get UUID path of sheet
+                        auto uuid = sheet.file.find("uuid");
+                        if (uuid != nullptr) {
+                            sheet.uuidPath = toplevelSheet.uuidPath + '/' + uuid->getString(0);
+                        }
+                    }
                 }
             }
 
+            // assign root page number
+            auto node = sheets.extract(-1);
+            node.key() = rootPage;
+            sheets.insert(std::move(node));
+
+            // varialbes for schematic annotation
+            std::map<std::string, std::string> oldToNewReference;
+            std::map<std::string, int> nextReference;
+
             // process each sheet
-            for (auto &sheet : sheets)
-            for (auto element1 : sheet.file.elements) {
-                auto container1 = dynamic_cast<kicad::Container *>(element1);
-                if (container1) {
+            for (auto &p : sheets) {
+                int sheetPage = p.first;
+                auto &sheet = p.second;
+
+                // symbol references sorted by y for schematic annotation
+                std::multimap<std::pair<double, double>, kicad::Value *> sortedReferences;
+
+                for (auto container1 : sheet.file) {
                     // check if it is a symbol
                     if (container1->id == "symbol") {
                         auto symbol = container1;
@@ -559,8 +601,10 @@ int main(int argc, const char **argv) {
                         std::string reference;
                         double x = 0;
                         double y = 0;
+                        kicad::Value *ref1 = nullptr;
+                        kicad::Value *ref2 = nullptr;
                         kicad::Container *manufacturer = nullptr;
-                        kicad::Container *mfrPn = nullptr;
+                        kicad::Container *mpn = nullptr;
                         kicad::Container *description = nullptr;
                         kicad::Container *datasheet = nullptr;
                         kicad::Container *lcscPn = nullptr;
@@ -573,14 +617,16 @@ int main(int argc, const char **argv) {
                             if (property != nullptr) {
                                 if (property->id == "at") {
                                     // position
-                                    x = property->getFloat(0);
-                                    y = property->getFloat(1);
+                                    x = property->getNumber(0);
+                                    y = property->getNumber(1);
                                 } else if (property->id == "property") {
                                     // property
                                     auto propertyName = property->getString(0);
 
                                     if (propertyName == "Reference") {
-                                        reference = property->getString(1);
+                                        if (reference.empty())
+                                            reference = property->getString(1);
+                                        ref1 = dynamic_cast<kicad::Value *>(property->elements[1]);
                                     } else if (propertyName == "Footprint") {
                                         // replace footprint
                                         auto footprint = property;
@@ -601,8 +647,8 @@ int main(int argc, const char **argv) {
                                         } else {
                                             if (propertyName == "Manufacturer") {
                                                 manufacturer = property;
-                                            } else if (propertyName == "Mfr. PN") {
-                                                mfrPn = property;
+                                            } else if (propertyName == "MPN") {
+                                                mpn = property;
                                             } else if (propertyName == "LCSC PN") {
                                                 lcscPn = property;
                                             } else if (propertyName == "Voltage") {
@@ -611,6 +657,7 @@ int main(int argc, const char **argv) {
                                         }
                                     }
                                 } else if (property->id == "instances") {
+                                    // repair instances, need to copy uuids from project (.kicad_pro)
                                     /*if (property->elements.size() > 1) {
                                         std::cout << "Warning: " << reference << " has more than one instance" << std::endl;
                                         property->elements.resize(1);
@@ -623,41 +670,103 @@ int main(int argc, const char **argv) {
                                             path->setString(0, sheet.uuidPath);
                                         }
                                     }*/
+
+                                    auto project = property->find("project");
+                                    if (project != nullptr) {
+                                        auto path = project->find("path");
+                                        if (path != nullptr) {
+                                            auto referenceContainer = path->find("reference");
+                                            if (referenceContainer != nullptr) {
+                                                reference = referenceContainer->getString(0);
+                                                ref2 = dynamic_cast<kicad::Value *>(referenceContainer->elements[0]);
+                                            }
+                                        }
+                                    }
+
                                 }
                             }
                             it = next;
                         }
 
-                        // add properties from imported bom
-                        {
-                            auto it = importedBom.find(reference);
-                            if (it != importedBom.end()) {
-                                addProperty(symbol, manufacturer, "Manufacturer", it->second.manufacturer, x, y);
-                                addProperty(symbol, mfrPn, "Mfr. PN", it->second.mfrPn, x, y);
-                                addProperty(symbol, description, "Description", it->second.description, x, y);
-                                addProperty(symbol, datasheet, "Datasheet", it->second.datasheet, x, y);
-                                addProperty(symbol, lcscPn, "LCSC PN", it->second.lcscPn, x, y);
-                            }
-                        }
-
-                        // add voltage
-                        {
-                            auto it = referenceToSymbol.find(reference);
-                            if (it != referenceToSymbol.end()) {
-                                auto sym = it->second;
-                                if (sym->voltageValid()) {
-                                    std::stringstream ss;
-                                    ss << sym->voltage();
-                                    addProperty(symbol, voltage, "Voltage", ss.str(), x, y);
+                        if (!reference.empty() && reference[0] != '#') {
+                            // add properties from imported bom
+                            {
+                                auto it = importedBom.find(reference);
+                                if (it != importedBom.end()) {
+                                    addProperty(symbol, manufacturer, "Manufacturer", it->second.manufacturer, x, y);
+                                    addProperty(symbol, mpn, "MPN", it->second.mpn, x, y);
+                                    addProperty(symbol, description, "Description", it->second.description, x, y);
+                                    addProperty(symbol, datasheet, "Datasheet", it->second.datasheet, x, y);
+                                    addProperty(symbol, lcscPn, "LCSC PN", it->second.lcscPn, x, y);
                                 }
                             }
+
+                            // add propagated voltage (propagation is done using pcb's)
+                            {
+                                auto it = referenceToSymbol.find(reference);
+                                if (it != referenceToSymbol.end()) {
+                                    auto sym = it->second;
+                                    if (sym->voltageValid()) {
+                                        std::stringstream ss;
+                                        ss << sym->voltage();
+                                        addProperty(symbol, voltage, "Voltage", ss.str(), x, y);
+                                    }
+                                }
+                            }
+
+                            if (annotateSchematic) {
+                                if (ref1)
+                                    sortedReferences.insert({{y, x}, ref1});
+                                if (ref2)
+                                    sortedReferences.insert({{y, x}, ref2});
+                            }
+                        }
+                    }
+                }
+
+                // annotate schematic (assign references)
+                if (annotateSchematic) {
+                    // update next reference indices
+                    for (auto &p : nextReference) {
+                        if (p.second < sheetPage) {
+                            p.second = sheetPage;
+                        }
+                    }
+
+                    for (auto &p : sortedReferences) {
+                        auto ref = p.second;
+                        auto reference = ref->getString();
+
+                        // check if new reference already exists
+                        if (oldToNewReference.contains(reference)) {
+                            // use new reference
+                            ref->setString(oldToNewReference[reference]);
+                        } else {
+                            // create new reference
+                            auto type = getType(reference);
+                            int index = sheetPage;
+                            if (nextReference.contains(type)) {
+                                index = nextReference[type];
+                            }
+
+                            std::string newReference = type + std::to_string(index);
+                            oldToNewReference[reference] = newReference;
+                            ref->setString(newReference);
+
+                            nextReference[type] = index + 1;
                         }
                     }
                 }
             }
 
+            // print mapping from old to new reference
+            for (auto &p : oldToNewReference) {
+                std::cout << p.first << " -> " << p.second << std::endl;
+            }
+
             // write sheets
-            for (auto &sheet : sheets) {
+            for (auto &p : sheets) {
+                auto &sheet = p.second;
                 std::cout << "Write " << sheet.path.string() << std::endl;
                 std::ofstream out(sheet.path.string());
                 if (!out) {
@@ -685,148 +794,142 @@ int main(int argc, const char **argv) {
             netToSymbols.clear();
 
             double2 moveFootprintPosition = {};
-            for (auto element1 : file.elements) {
-                auto container1 = dynamic_cast<kicad::Container *>(element1);
-                if (container1) {
-                    // check if it is a footprint
-                    if (container1->id == "footprint") {
-                        auto footprint = container1;
+            for (auto container1 : file) {
+                // check if it is a footprint
+                if (container1->id == "footprint") {
+                    auto footprint = container1;
 
-                        // get footprint name
-                        auto footprintName = footprint->getString(0);
-                        //std::cout << "Footprint: " << footprintName << std::endl;
+                    // get footprint name
+                    auto footprintName = footprint->getString(0);
+                    //std::cout << "Footprint: " << footprintName << std::endl;
 
-                        // iterate over properties of footprint
-                        double2 position = {0, 0};
-                        double rotation = 0;
-                        std::string reference;
-                        std::string value;
-                        bool excludeFromBom = false;
-                        for (auto element2 : footprint->elements) {
-                            auto property = dynamic_cast<kicad::Container *>(element2);
-                            if (property) {
-                                if (property->id == "at") {
-                                    auto at = property;
+                    // iterate over properties of footprint
+                    double2 position = {0, 0};
+                    double rotation = 0;
+                    std::string reference;
+                    std::string value;
+                    bool excludeFromBom = false;
+                    for (auto element2 : footprint->elements) {
+                        auto property = dynamic_cast<kicad::Container *>(element2);
+                        if (property) {
+                            if (property->id == "at") {
+                                auto at = property;
 
-                                    // move footprint away
-                                    if (match(footprintName, moveFootprint)) {
-                                        at->setFloat(0, moveFootprintPosition.x);
-                                        at->setFloat(1, moveFootprintPosition.y);
-                                        //at->setFloat(2, 0);
-                                        moveFootprintPosition.y += 2;
-                                    }
-
-                                    position.x = at->getFloat(0);
-                                    position.y = at->getFloat(1);
-                                    rotation = at->getFloat(2);
-                                } else if (property->id == "property") {
-                                    std::string propertyName = property->getString(0);
-                                    if (propertyName == "Reference") {
-                                        // get reference and hide if requested
-                                        reference = property->getString(1);
-
-                                        // check if reference matches a reference to hide
-                                        if (match(reference, hideReference)) {
-                                            std::cout << "Hide reference: " << reference << std::endl;
-
-                                            auto hide = property->find("hide");
-                                            property->erase(hide);
-
-                                            // add hide attribute
-                                            property->add("hide")->addTag("yes");
-                                        }
-                                    } else if (propertyName == "Value") {
-                                        // get reference and hide if requested
-                                        value = property->getString(1);
-                                    }
-                                } else if (property->id == "attr") {
-                                    //doNotPopulate = property->contains("dnp");
-                                    excludeFromBom = property->contains("exclude_from_bom");
-                                    //throughHole = property->contains("through_hole");
+                                // move footprint away
+                                if (match(footprintName, moveFootprint)) {
+                                    at->setNumber(0, moveFootprintPosition.x);
+                                    at->setNumber(1, moveFootprintPosition.y);
+                                    //at->setNumber(2, 0);
+                                    moveFootprintPosition.y += 2;
                                 }
 
+                                position.x = at->getNumber(0);
+                                position.y = at->getNumber(1);
+                                rotation = at->getNumber(2);
+                            } else if (property->id == "property") {
+                                std::string propertyName = property->getString(0);
+                                if (propertyName == "Reference") {
+                                    // get reference and hide if requested
+                                    reference = property->getString(1);
+
+                                    // check if reference matches a reference to hide
+                                    if (match(reference, hideReference)) {
+                                        std::cout << "Hide reference: " << reference << std::endl;
+
+                                        auto hide = property->find("hide");
+                                        property->erase(hide);
+
+                                        // add hide attribute
+                                        property->add("hide")->addTag("yes");
+                                    }
+                                } else if (propertyName == "Value") {
+                                    // get reference and hide if requested
+                                    value = property->getString(1);
+                                }
+                            } else if (property->id == "attr") {
+                                //doNotPopulate = property->contains("dnp");
+                                excludeFromBom = property->contains("exclude_from_bom");
+                                //throughHole = property->contains("through_hole");
                             }
+
                         }
+                    }
 
-                        // define voltage
-                        Symbol *symbol = nullptr;
-                        if (defineVoltages && !excludeFromBom) {
-                            symbol = &symbols.emplace_back(reference);
-                            if (symbolVoltages.contains(reference)) {
-                                // set voltage if it is defined for the symbol
-                                auto &voltage = symbolVoltages[reference];
-                                symbol->setVoltage(voltage.first, voltage.second);
-                                symbol->fixedVoltage = true;
-                            }
-                            referenceToSymbol[reference] = symbol;
+                    // define voltage
+                    Symbol *symbol = nullptr;
+                    if (defineVoltages && !excludeFromBom) {
+                        symbol = &symbols.emplace_back(reference);
+                        if (symbolVoltages.contains(reference)) {
+                            // set voltage if it is defined for the symbol
+                            auto &voltage = symbolVoltages[reference];
+                            symbol->setVoltage(voltage.first, voltage.second);
+                            symbol->fixedVoltage = true;
                         }
+                        referenceToSymbol[reference] = symbol;
+                    }
 
-                        // iterate over pads of footprint
-                        for (auto element2 : footprint->elements) {
-                            auto container2 = dynamic_cast<kicad::Container *>(element2);
-                            if (container2) {
-                                if (container2->id == "pad") {
-                                    auto pad = container2;
+                    // iterate over pads of footprint
+                    for (auto container2 : *footprint) {
+                        if (container2->id == "pad") {
+                            auto pad = container2;
 
-                                    // get pad name (typcally a number)
-                                    //std::string padName = clean(pad->getValue(0));
+                            // get pad name (typcally a number)
+                            //std::string padName = clean(pad->getValue(0));
 
-                                    auto net = pad->find("net");
-                                    if (net != nullptr) {
-                                        auto netNumber = net->getInt(0);
-                                        auto netName = net->getString(1);
+                            auto net = pad->find("net");
+                            if (net != nullptr) {
+                                auto netNumber = net->getInt(0);
+                                auto netName = net->getString(1);
 
-                                        // define voltage
-                                        if (symbol != nullptr) {
-                                            auto v = match(netName, netVoltages);
-                                            if (v) {
-                                                // set voltage if it is defined for the net
-                                                symbol->setVoltage(*v);
-                                            } else {
-                                                // add net unless it is an input
-                                                auto pinType = pad->findString("pintype");
-                                                if (pinType != "input") {
-                                                    symbol->nets.insert(netNumber);
-                                                }
-                                                netToSymbols[netNumber].insert(symbol);
-                                            }
+                                // define voltage
+                                if (symbol != nullptr) {
+                                    auto v = match(netName, netVoltages);
+                                    if (v) {
+                                        // set voltage if it is defined for the net
+                                        symbol->setVoltage(*v);
+                                    } else {
+                                        // add net unless it is an input
+                                        auto pinType = pad->findString("pintype");
+                                        if (pinType != "input") {
+                                            symbol->nets.insert(netNumber);
                                         }
-
-                                        // remove net from pad if requested
-                                        if (match(netName, removeNet)) {
-                                            // erase net
-                                            std::cout << "Erase net " << netName << " of " << reference << std::endl;
-                                            pad->erase(net);
-                                        }
+                                        netToSymbols[netNumber].insert(symbol);
                                     }
                                 }
+
+                                // remove net from pad if requested
+                                if (match(netName, removeNet)) {
+                                    // erase net
+                                    std::cout << "Erase net " << netName << " of " << reference << std::endl;
+                                    pad->erase(net);
+                                }
                             }
                         }
-                    } else if (hasExchangeSegmentWidth && container1->id == "segment") {
-                        auto segment = container1;
-                        auto width = segment->find("width");
-                        if (width != nullptr) {
-                            try {
-                                double oldWidth = width->getFloat(0);
-                                auto it = exchangeSegmentWidth.find(int(std::round(oldWidth * 1000.0)));
-                                if (it != exchangeSegmentWidth.end()) {
-                                    width->setFloat(0, it->second);
-                                }
-                            } catch (std::exception &) {
+                    }
+                } else if (hasExchangeSegmentWidth && container1->id == "segment") {
+                    auto segment = container1;
+                    auto width = segment->find("width");
+                    if (width != nullptr) {
+                        try {
+                            double oldWidth = width->getNumber(0);
+                            auto it = exchangeSegmentWidth.find(int(std::round(oldWidth * 1000.0)));
+                            if (it != exchangeSegmentWidth.end()) {
+                                width->setNumber(0, it->second);
                             }
+                        } catch (std::exception &) {
                         }
-                    } else if (hasExchangeViaSize && container1->id == "via") {
-                        auto via = container1;
-                        auto size = via->find("size");
-                        if (size != nullptr) {
-                            try {
-                                double oldSize = size->getFloat(0);
-                                auto it = exchangeViaSize.find(int(std::round(oldSize * 1000.0)));
-                                if (it != exchangeViaSize.end()) {
-                                    size->setFloat(0, it->second);
-                                }
-                            } catch (std::exception &) {
+                    }
+                } else if (hasExchangeViaSize && container1->id == "via") {
+                    auto via = container1;
+                    auto size = via->find("size");
+                    if (size != nullptr) {
+                        try {
+                            double oldSize = size->getNumber(0);
+                            auto it = exchangeViaSize.find(int(std::round(oldSize * 1000.0)));
+                            if (it != exchangeViaSize.end()) {
+                                size->setNumber(0, it->second);
                             }
+                        } catch (std::exception &) {
                         }
                     }
                 }
@@ -941,9 +1044,9 @@ int main(int argc, const char **argv) {
                         auto orientation = *bestPlace;
                         orientation.rotation += bestFlip ? 180.0f : 0.0f;
                         bestFootprint->place(orientation);
-                        //bestFootprint->at->setFloat(0, orientation.position.x);
-                        //bestFootprint->at->setFloat(1, orientation.position.y);
-                        //bestFootprint->at->setFloat(2, orientation.rotation);
+                        //bestFootprint->at->setNumber(0, orientation.position.x);
+                        //bestFootprint->at->setNumber(1, orientation.position.y);
+                        //bestFootprint->at->setNumber(2, orientation.rotation);
 
                         // remove
                         places.erase(bestPlace);

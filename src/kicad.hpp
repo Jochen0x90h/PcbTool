@@ -17,17 +17,19 @@ namespace kicad {
 
 class Element {
 public:
-
-    virtual ~Element() {}
-    virtual int count() = 0;
-    virtual void sweep() = 0;
-    virtual void write(std::ostream &s, int indent) = 0;
-
     enum class Action {
         NONE,
         KEEP,
         DELETE,
     };
+
+    Element() = default;
+    Element(Element &&other) = default;
+    virtual ~Element();
+    virtual int count() = 0;
+    virtual Action sweep();
+    virtual void write(std::ostream &s, int indent) = 0;
+
     Action action = Action::NONE;
 };
 
@@ -36,10 +38,10 @@ class Value : public Element {
 public:
     Value() = default;
     Value(std::string_view value) : value(value) {}
+    Value(Value &&other) = default;
 
     ~Value() override;
     int count() override;
-    void sweep() override;
     void write(std::ostream &s, int indent) override;
 
     std::string getString(std::string_view defaultValue = {});
@@ -63,10 +65,11 @@ public:
     Container() = default;
     Container(std::string_view id) : id(id) {}
     Container(const Container &) = delete;
+    Container(Container &&other) = default;
 
     virtual ~Container();
     int count() override;
-    void sweep() override;
+    Action sweep() override;
     void write(std::ostream &s, int indent) override;
 
 

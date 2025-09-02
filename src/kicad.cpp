@@ -153,6 +153,15 @@ void readContainer(Tokenizer &t, Container &container) {
     return str;
 }*/
 
+// Element
+
+Element::~Element() {
+}
+
+Element::Action Element::sweep(){
+    return this->action;
+}
+
 
 // Value
 
@@ -161,9 +170,6 @@ Value::~Value() {
 
 int Value::count() {
     return 1;
-}
-
-void Value::sweep() {
 }
 
 void Value::write(std::ostream &s, int indent) {
@@ -201,18 +207,21 @@ int Container::count() {
     return c;
 }
 
-void Container::sweep() {
+Element::Action Container::sweep() {
     auto dst = this->elements.begin();
+    bool keep = false;
     for (auto src = dst; src != this->elements.end(); ++src) {
-        if ((*src)->action == Action::DELETE) {
+        auto action = (*src)->sweep();
+        if (action != Action::KEEP && (*src)->action == Action::DELETE) {
             delete *src;
         } else {
-            (*src)->sweep();
             *dst = *src;
             ++dst;
+            keep |= action == Action::KEEP;
         }
     }
     this->elements.erase(dst, this->elements.end());
+    return keep ? Action::KEEP : this->action;
 }
 
 void Container::write(std::ostream &s, int indent) {

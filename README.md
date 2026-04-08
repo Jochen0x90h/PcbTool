@@ -10,15 +10,16 @@ Can be used to hide some or all references or remove nets from pads prior to aut
 ## Usage
 | Parameter                                      | Description
 |------------------------------------------------|-----------------
-| -xfp \<old footprint> \<new footprint>         | Exchange footprint (only schematic)
+| -sfp \<reference regex> \<footprint>           | Set footprint (only schematic)
+| -xfp \<old footprint regex> \<new footprint>   | Exchange footprint (only schematic)
 | -ijb \<bom file>                               | Import downloaded JLCPCB BOM Excel file (only schematic)
 | -as                                            | Annotate schematic using sheet number as first number (only schematic)
+| -rp \<property regex>                          | Remove property (schematic and pcb)
 | -xsw \<old segment width> \<new segment width> | Exchange segment width (only pcb)
 | -xvs \<old via size> \<new via size>           | Exchange segment width (only pcb)
 | -hr \<reference>                               | Hide reference, supports regular expressions, e.g. R.* (only pcb)
 | -rn \<net>                                     | Remove net, supports regular expressions, e.g. GND (only pcb)
 | -mfp \<footprint>                              | Move footprint to border (only pcb)
-| -rp \<property>                                | Remove property (schematic and pcb)
 
 
 ## Examples

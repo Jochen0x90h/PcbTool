@@ -15,7 +15,7 @@ class Project(ConanFile):
     requires = [
         #"nlohmann_json/3.12.0",
         #"openxlsx/0.4.1"
-        "xlnt/1.5.0"
+        "xlnt/1.6.1"
     ]
 
     keep_imports = True

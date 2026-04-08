@@ -34,6 +34,21 @@ std::string getType(std::string_view str) {
 
 // schematic
 
+struct StringMatch {
+    std::regex regex;
+    std::string str;
+};
+
+const std::string *match(const std::string &str, const std::list<StringMatch> &list) {
+    for (auto &element : list) {
+        if (std::regex_match(str, element.regex)) {
+            return &element.str;
+        }
+    }
+    return nullptr;
+}
+
+
 struct ReferenceAndUnit {
     kicad::Value *ref1;
     kicad::Value *ref2;
@@ -69,7 +84,11 @@ std::string getCellValue(const xlnt::worksheet &sheet, int row, int col) {
         }
     }
 
-    return sheet[ref].to_string();
+    try {
+        return sheet[ref].to_string();
+    } catch (std::exception &e) {
+        return {};
+    }
 }
 
 struct Sheet {
@@ -322,84 +341,74 @@ struct Template {
 void getFootprints(kicad::Container &file, std::list<Footprint>& refFootprints,
     std::list<Footprint> &placementFootprints)
 {
-    for (auto element1 : file.elements) {
-        auto container1 = dynamic_cast<kicad::Container *>(element1);
-        if (container1) {
-            // check if it is a footprint
-            if (container1->id == "footprint") {
-                auto footprint = container1;
+    for (auto container1 : file) {
+        // check if it is a footprint
+        if (container1->id == "footprint") {
+            auto footprint = container1;
 
-                // get footprint name
-                auto footprintName = footprint->getString(0);
-                //std::cout << "Footprint: " << footprintName << std::endl;
+            // get footprint name
+            auto footprintName = footprint->getString(0);
+            std::cout << "Footprint: " << footprintName << std::endl;
 
-                // iterate over properties of footprint
-                kicad::Container *at = nullptr;
-                double2 position = {0, 0};
-                double rotation = 0;
-                std::string reference;
-                std::string value;
-                std::vector<Pad> pads;
-                for (auto element2 : footprint->elements) {
-                    auto container2 = dynamic_cast<kicad::Container *>(element2);
-                    if (container2) {
-                        if (container2->id == "at") {
-                            at = container2;
-                            position.x = at->getNumber(0);
-                            position.y = at->getNumber(1);
-                            rotation = at->getNumber(2);
-                        } else if (container2->id == "property") {
-                            auto property = container2;
-                            std::string propertyName = property->getString(0);
-                            if (propertyName == "Reference") {
-                                // get reference and hide if requested
-                                reference = property->getString(1);
-                            } else if (propertyName == "Value") {
-                                // get reference and hide if requested
-                                value = property->getString(1);
-                            }
-                        }
+            // iterate over properties of footprint
+            kicad::Container *at = nullptr;
+            double2 position = {0, 0};
+            double rotation = 0;
+            std::string reference;
+            std::string value;
+            std::vector<Pad> pads;
+            for (auto property : *footprint) {
+                if (property->id == "at") {
+                    at = property;
+                    position.x = at->getNumber(0);
+                    position.y = at->getNumber(1);
+                    rotation = at->getNumber(2);
+                } else if (property->id == "property") {
+                    std::string propertyName = property->getString(0);
+                    if (propertyName == "Reference") {
+                        // get reference and hide if requested
+                        reference = property->getString(1);
+                    } else if (propertyName == "Value") {
+                        // get reference and hide if requested
+                        value = property->getString(1);
                     }
                 }
+            }
 
-                bool addToRefFootprints = at != nullptr && (value.starts_with("TLV3544IPW") || value.starts_with("TSV912AIDSG"));
-                bool addToPlacementFootprints = at != nullptr && footprintName == "local:0402";
+            bool addToRefFootprints = at != nullptr && (value.starts_with("TLV3544IPW") || value.starts_with("TSV912AIDSG"));
+            bool addToPlacementFootprints = at != nullptr && footprintName == "local:0402";
 
-                if (addToRefFootprints || addToPlacementFootprints) {
-                    // iterate over pads of footprint
-                    for (auto element2 : footprint->elements) {
-                        auto container2 = dynamic_cast<kicad::Container *>(element2);
-                        if (container2) {
-                            if (container2->id == "pad") {
-                                auto pad = container2;
+            if (addToRefFootprints || addToPlacementFootprints) {
+                // iterate over pads of footprint
+                for (auto property : *footprint) {
+                    if (property->id == "pad") {
+                        auto pad = property;
 
-                                // get pad name (typically a number)
-                                std::string padName = pad->getString(0);
+                        // get pad name (typically a number)
+                        std::string padName = pad->getString(0);
 
-                                // get pad position
-                                auto at = pad->find("at");
-                                //auto at = pad->findFloat2("at");
-                                auto x = at->getNumber(0);
-                                auto y = at->getNumber(1);
+                        // get pad position
+                        auto at = pad->find("at");
+                        //auto at = pad->findFloat2("at");
+                        auto x = at->getNumber(0);
+                        auto y = at->getNumber(1);
 
-                                // get net number
-                                int netNumber = -1;
-                                auto net = pad->find("net");
-                                if (net != nullptr) {
-                                    netNumber = net->getInt(0);
-                                    //auto netName = net->getString(1);
-                                }
-                                pads.push_back({padName, at, {x, y}, netNumber});
-                            }
+                        // get net number
+                        int netNumber = -1;
+                        auto net = pad->find("net");
+                        if (net != nullptr) {
+                            netNumber = net->getInt(0);
+                            //auto netName = net->getString(1);
                         }
+                        pads.push_back({padName, at, {x, y}, netNumber});
                     }
                 }
+            }
 
-                if (addToRefFootprints) {
-                    refFootprints.push_back({footprintName, at, {position, rotation}, reference, value, pads});
-                } else if (addToPlacementFootprints) {
-                    placementFootprints.push_back({footprintName, at, {position, rotation}, reference, value, pads});
-                }
+            if (addToRefFootprints) {
+                refFootprints.push_back({footprintName, at, {position, rotation}, reference, value, pads});
+            } else if (addToPlacementFootprints) {
+                placementFootprints.push_back({footprintName, at, {position, rotation}, reference, value, pads});
             }
         }
     }
@@ -409,7 +418,8 @@ void getFootprints(kicad::Container &file, std::list<Footprint>& refFootprints,
 
 int main(int argc, const char **argv) {
     // schematic options
-    std::map<std::string, std::string> exchangeFootprint;
+    std::list<StringMatch> setFootprint;
+    std::list<StringMatch> exchangeFootprint;
     std::list<NetVoltage> netVoltages;
     std::map<std::string, std::pair<double, double>> symbolVoltages;
     std::map<std::string, Properties> importedBom;
@@ -421,6 +431,7 @@ int main(int argc, const char **argv) {
     std::list<std::regex> hideReference;
     std::list<std::regex> removeNet;
     std::list<std::regex> moveFootprint;
+    bool circle = false;
 
     // schematic and pcb options
     std::list<std::regex> removeProperty;
@@ -432,10 +443,14 @@ int main(int argc, const char **argv) {
 
     for (int i = 1; i < argc; ++i) {
         std::string_view arg = argv[i];
-        if (arg == "-xfp") {
+        if (arg == "-sfp") {
+            // set footprint (set footprint for each matching reference)
+            i += 2;
+            setFootprint.emplace_back(std::regex(argv[i - 1]), argv[i]);
+        } else if (arg == "-xfp") {
             // exchange footprint
             i += 2;
-            exchangeFootprint[argv[i - 1]] = argv[i];
+            exchangeFootprint.emplace_back(std::regex(argv[i - 1]), argv[i]);
         } else if (arg == "-nv") {
             // define net voltage
             i += 2;
@@ -462,7 +477,7 @@ int main(int argc, const char **argv) {
 
                 // split references (designators) by comma
                 std::stringstream ss(references);
-                while (ss.good()) {
+                while (ss.good() && !lcscPn.empty()) {
                     std::string reference;
                     std::getline(ss, reference, ',');
                     importedBom[reference] = {manufacturer, mpn, description, datasheet, lcscPn};
@@ -471,7 +486,7 @@ int main(int argc, const char **argv) {
         } else if (arg == "-as") {
             // annotate schematic
             annotateSchematic = true;
-        } else if (arg == "-rsw") {
+        } else if (arg == "-xsw") {
             // exchange segment width
             i += 2;
             try {
@@ -482,7 +497,7 @@ int main(int argc, const char **argv) {
             } catch (std::exception &) {
                 // invalid width
             }
-        } else if (arg == "-rvs") {
+        } else if (arg == "-xvs") {
             // exchange via size
             i += 2;
             try {
@@ -531,6 +546,9 @@ int main(int argc, const char **argv) {
                     std::cout << "Warning: Template " << path.string() << " has multiple reference footprints" << std::endl;
                 }
             }
+        } else if (arg == "-c") {
+            // circle (only for testing)
+            circle = true;
         } else {
             paths.emplace_back(argv[i]);
         }
@@ -548,13 +566,16 @@ int main(int argc, const char **argv) {
     bool hasExchangeSegmentWidth = !exchangeSegmentWidth.empty();
     bool hasExchangeViaSize = !exchangeViaSize.empty();
 
+    // print usage if no input files
     if (paths.empty()) {
         std::cout << "Usage: pcb-tool [options] schematic.kicad_sch layout.kicad_pcb ..." << std::endl;
-        std::cout << "    -xfp <old footprint> <new footprint>           Exchange footprint (only schematic)" << std::endl;
+        std::cout << "    -sfp <reference regex> <footprint>             Exchange footprint (only schematic)" << std::endl;
+        std::cout << "    -xfp <old footprint regex> <new footprint>     Exchange footprint (only schematic)" << std::endl;
         std::cout << "    -ijb <bom file>                                Import downloaded JLCPCB BOM Excel file (only schematic)" << std::endl;
         std::cout << "    -as                                            Annotate schematic using sheet number as first number (only schematic)" << std::endl;
+        std::cout << "    -rp <property regex>                           Remove property (schematic and pcb)" << std::endl;
         std::cout << "    -xsw <old segment width> <new segment width>   Exchange segment width (only pcb)" << std::endl;
-        std::cout << "    -xvs <old via size> <new via size>             Exchange segment width (only pcb)" << std::endl;
+        std::cout << "    -xvs <old via size> <new via size>             Exchange via size (only pcb)" << std::endl;
         std::cout << "    -hr <reference>                                Hide reference, supports regular expressions, e.g. R.* (only pcb)" << std::endl;
         std::cout << "    -rn <net>                                      Remove net, supports regular expressions, e.g. GND (only pcb)" << std::endl;
         std::cout << "    -mfp <footprint>                               Move footprint to border (only pcb)" << std::endl;
@@ -667,10 +688,11 @@ int main(int argc, const char **argv) {
                         double y = 0;
                         kicad::Value *ref1 = nullptr;
                         kicad::Value *ref2 = nullptr;
-                        kicad::Container *manufacturer = nullptr;
-                        kicad::Container *mpn = nullptr;
+                        kicad::Container *footprint = nullptr;
                         kicad::Container *description = nullptr;
                         kicad::Container *datasheet = nullptr;
+                        kicad::Container *manufacturer = nullptr;
+                        kicad::Container *mpn = nullptr;
                         kicad::Container *lcscPn = nullptr;
                         kicad::Container *voltage = nullptr;
                         for (auto property : *symbol) {
@@ -692,14 +714,15 @@ int main(int argc, const char **argv) {
                                         reference = property->getString(1);
                                     ref1 = dynamic_cast<kicad::Value *>(property->elements[1]);
                                 } else if (propertyName == "Footprint") {
-                                    // replace footprint
+                                    footprint = property;
+                                    /*// replace footprint
                                     auto footprint = property;
                                     auto footprintName = footprint->getString(1);
                                     auto it = exchangeFootprint.find(footprintName);
                                     if (it != exchangeFootprint.end()) {
                                         std::cout << "Replace footprint " << it->first << " by " << it->second << std::endl;
                                         footprint->setString(1, it->second);
-                                    }
+                                    }*/
                                 } else if (propertyName == "Description") {
                                     description = property;
                                 } else if (propertyName == "Datasheet") {
@@ -741,7 +764,7 @@ int main(int argc, const char **argv) {
 
                                                 // get reference
                                                 reference = r->getString(0);
-                                                std::cout << "Instance " << reference << std::endl;
+                                                //std::cout << "Instance " << reference << std::endl;
                                                 ref2 = dynamic_cast<kicad::Value *>(r->elements[0]);
 
                                                 // keep instance
@@ -760,6 +783,22 @@ int main(int argc, const char **argv) {
                         }
 
                         if (!reference.empty() && unit >= 0 && reference[0] != '#') {
+                            // set or exchange footprint
+                            if (footprint != nullptr) {
+                                // set footprint for reference
+                                if (auto str = match(reference, setFootprint)) {
+                                    std::cout << "Set footprint for " << reference << " to " << *str << std::endl;
+                                    footprint->setString(1, *str);
+                                }
+
+                                // exchange footprint based on current footprint name
+                                auto footprintName = footprint->getString(1);
+                                if (auto str = match(footprintName, exchangeFootprint)) {
+                                    std::cout << "Replace footprint of " << reference << " from " << footprintName << " to " << *str << std::endl;
+                                    footprint->setString(1, *str);
+                                }
+                            }
+
                             // add properties from imported bom
                             {
                                 auto it = importedBom.find(reference);
@@ -797,10 +836,12 @@ int main(int argc, const char **argv) {
 
                 // annotate schematic (assign references)
                 if (annotateSchematic) {
+                    int firstIndex = sheetPage * 100;
+
                     // update next reference indices
                     for (auto &p : nextReference) {
-                        if (p.second < sheetPage) {
-                            p.second = sheetPage;
+                        if (p.second < firstIndex) {
+                            p.second = firstIndex;
                         }
                     }
 
@@ -824,7 +865,7 @@ int main(int argc, const char **argv) {
                         if (newReference.empty()) {
                             // create new reference
                             auto type = getType(reference);
-                            int index = sheetPage;
+                            int index = firstIndex;
                             if (nextReference.contains(type)) {
                                 index = nextReference[type];
                             }
@@ -1148,11 +1189,94 @@ int main(int argc, const char **argv) {
                 }*/
             }
 
+            if (circle) {
+                const double centerX = 140.0;
+                const double centerY = 100.0;
+                for (auto footprint : file) {
+                    if (footprint->id == "footprint") {
+                        for (auto property : *footprint) {
+                            if (property->id == "property" && property->getString(0) == "Reference") {
+                                auto reference = property->getString(1);
+
+                                if (reference[0] == 'D') {
+                                    int index = std::stoi(reference.substr(1)) - 500;
+                                    if (index >= 0 && index < 256) {
+                                        auto at = footprint->find("at");
+
+                                        double angle = index * (360.0 / 256.0);
+
+                                        double radius = 45.0;
+                                        double x = centerX + radius * std::sin(angle * pi / 180.0);
+                                        double y = centerY - radius * std::cos(angle * pi / 180.0);
+
+                                        at->setNumber(0, x).setNumber(1, y).setNumber(2, 90.0 - angle + ((index & 15) < 8 ? 0 : 180));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                double lastPadX;
+                double lastPadY;
+                for (int index = 0; index < 256; ++index) {
+                    double angle = index * (360.0 / 256.0);
+                    int i = index & 15;
+
+                    double viaRadius = 40.8 + i * 0.55;
+                    double angleOffset = 0;
+                    if (i >= 7 && i <= 9)
+                        angleOffset = 0.45 / viaRadius * (i == 7 ? -1 : 1);
+                    double viaX = centerX + viaRadius * std::sin(angle * pi / 180.0 + angleOffset);
+                    double viaY = centerY - viaRadius * std::cos(angle * pi / 180.0 + angleOffset);
+
+                    //double padRadius = i < 8 ? 44.52 : 45.48;
+                    //double padX = centerX + padRadius * std::sin(angle * pi / 180.0);
+                    //double padY = centerY - padRadius * std::cos(angle * pi / 180.0);
+
+                    double padX[2];
+                    double padY[2];
+                    for (int j = 0; j < 2; ++j) {
+                        double padRadius = 45.0 + 0.95 * (j - 0.5);
+                        padX[j] = centerX + padRadius * std::sin(angle * pi / 180.0);
+                        padY[j] = centerY - padRadius * std::cos(angle * pi / 180.0);
+                    }
+                    int padIndex = i < 8 ? 0 : 1;
+
+                    // place via
+                    auto via = file.add("via");
+                    via->add("at")->addNumber(viaX).addNumber(viaY);
+                    via->add("size")->addNumber(0.4);
+                    via->add("drill")->addNumber(0.3);
+                    via->add("layers")->addString("F.Cu").addString("B.Cu");
+
+                    // place segment to via
+                    auto segment = file.add("segment");
+                    segment->add("start")->addNumber(viaX).addNumber(viaY);
+                    segment->add("end")->addNumber(padX[padIndex]).addNumber(padY[padIndex]);
+                    segment->add("width")->addNumber(0.15);
+                    segment->add("layer")->addString("F.Cu");
+                    segment->add("net")->addNumber(1);
+
+                    // place connecting segment
+                    if (i != 0) {
+                        segment = file.add("segment");
+                        segment->add("start")->addNumber(lastPadX).addNumber(lastPadY);
+                        segment->add("end")->addNumber(padX[padIndex ^ 1]).addNumber(padY[padIndex ^ 1]);
+                        segment->add("width")->addNumber(0.15);
+                        segment->add("layer")->addString("F.Cu");
+                        segment->add("net")->addNumber(1);
+                    }
+                    lastPadX = padX[padIndex ^ 1];
+                    lastPadY = padY[padIndex ^ 1];
+                }
+            }
+
             // write pcb file
             std::cout << "Write " << path.string() << std::endl;
             std::ofstream out(path.string());
             if (!out) {
                 // error
+                std::cerr << "Error writing file!" << std::endl;
                 return 1;
             }
             kicad::writeFile(out, file);
